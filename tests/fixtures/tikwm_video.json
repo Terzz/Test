@@ -1,0 +1,14 @@
+{
+  "code": 0,
+  "msg": "success",
+  "processed_time": 0.22,
+  "data": {
+    "id": "7369836402751671999",
+    "region": "FR",
+    "title": "get ready with me",
+    "play": "https://v16-webapp.tiktok.com/video.mp4",
+    "hdplay": "https://v16-webapp.tiktok.com/video-hd.mp4",
+    "duration": 27,
+    "author": {"id": "456", "unique_id": "quelquun", "nickname": "quelqu un"}
+  }
+}

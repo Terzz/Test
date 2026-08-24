@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "msg": "success",
+  "processed_time": 0.31,
+  "data": {
+    "id": "7369836402751671585",
+    "region": "FR",
+    "title": "mes pieces preferees de l'automne",
+    "images": [
+      "https://p16-sign.tiktokcdn-us.com/obj/slide-1.jpeg?x-expires=1&x-signature=aaa",
+      "https://p16-sign.tiktokcdn-us.com/obj/slide-2.jpeg?x-expires=1&x-signature=bbb",
+      "https://p16-sign.tiktokcdn-us.com/obj/slide-3.jpeg?x-expires=1&x-signature=ccc"
+    ],
+    "music_info": {"title": "son original", "author": "quelquun"},
+    "author": {"id": "123", "unique_id": "unefille", "nickname": "une fille"},
+    "digg_count": 4210,
+    "play_count": 91234
+  }
+}
