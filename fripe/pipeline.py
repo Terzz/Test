@@ -12,15 +12,15 @@ from pathlib import Path
 import httpx
 
 from fripe.config import Config
-from fripe.llm import LLMBackend, LLMError
+from fripe.llm import LLMBackend
 from fripe.models import Garment, GarmentResult, VintedItem
 from fripe.rerank import Reranker
 from fripe.tiktok import (
     NotATikTokUrl,
-    TikTokError,
     download_slides,
     fetch_slides,
     find_tiktok_url,
+    release_local_copies,
 )
 from fripe.vinted import VintedClient, VintedError
 from fripe.vision import analyze_slides, crop_garment
@@ -60,7 +60,11 @@ async def _safe_progress(on_progress: ProgressFn, message: str) -> None:
 
 
 def _merge_round_robin(result_lists: Sequence[Sequence[VintedItem]]) -> list[VintedItem]:
-    """Entrelace les listes pour equilibrer les variantes, sans doublon d'annonce."""
+    """Entrelace les listes pour equilibrer les variantes, sans doublon d'annonce.
+
+    Reserve aux variantes d'une meme recherche, qui se valent : entrelacer des
+    resultats elargis ferait remonter les moins pertinents.
+    """
     merged: list[VintedItem] = []
     seen: set[int] = set()
     for rank in range(max((len(lst) for lst in result_lists), default=0)):
@@ -73,6 +77,26 @@ def _merge_round_robin(result_lists: Sequence[Sequence[VintedItem]]) -> list[Vin
             seen.add(item.id)
             merged.append(item)
     return merged
+
+
+def _append_dedup(base: Sequence[VintedItem], extra: Sequence[VintedItem]) -> list[VintedItem]:
+    """Ajoute les resultats d'une recherche elargie derriere les resultats precis."""
+    seen = {item.id for item in base}
+    merged = list(base)
+    for item in extra:
+        if item.id not in seen:
+            seen.add(item.id)
+            merged.append(item)
+    return merged
+
+
+def _slide_for(slide_paths: Sequence[Path], slide_index: int) -> Path:
+    """Retrouve la slide par son numero : les echecs de telechargement font des trous."""
+    wanted = f"{max(slide_index, 1):02d}"
+    for path in slide_paths:
+        if path.stem == wanted:
+            return path
+    return slide_paths[0]
 
 
 async def _run_queries(
@@ -134,7 +158,7 @@ async def _search_garment(
             brand_ids=brand_ids,
             price_to=cfg.price_to,
         )
-        pooled = _merge_round_robin([pooled, widened])
+        pooled = _append_dedup(pooled, widened)
         note = "recherche élargie : couleur ignorée"
 
     if len(pooled) >= MIN_RESULTS:
@@ -148,7 +172,7 @@ async def _search_garment(
         brand_ids=None,
         price_to=cfg.price_to,
     )
-    pooled = _merge_round_robin([pooled, widened])
+    pooled = _append_dedup(pooled, widened)
     if widened:
         note = "recherche élargie : filtres ignorés"
     return pooled, note
@@ -164,11 +188,13 @@ async def _rank_garment(
     if len(candidates) <= 1:
         return candidates
 
-    index = min(max(garment.slide_index, 1), len(slide_paths)) - 1
-    source = crop_garment(slide_paths[index], garment.bbox, label="Image 1:")
-
     try:
-        ranked = await deps.reranker.rank(source, candidates[:MAX_CANDIDATES])
+        source = crop_garment(
+            _slide_for(slide_paths, garment.slide_index), garment.bbox, label="Image 1:"
+        )
+        ranked = await deps.reranker.rank(
+            source, candidates[:MAX_CANDIDATES], garment_label=garment.label_fr
+        )
     except Exception:
         # Le classement visuel est un confort : en cas de pepin on garde
         # l'ordre de pertinence de Vinted.
@@ -236,6 +262,9 @@ async def process_link(
         )
         return results
     finally:
+        # Sans appel a download_slides (echec precoce), le repli gallery-dl
+        # laisserait son dossier temporaire derriere lui.
+        release_local_copies(post)
         shutil.rmtree(slides_dir, ignore_errors=True)
 
 

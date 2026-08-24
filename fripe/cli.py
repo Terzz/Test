@@ -17,7 +17,7 @@ import sys
 import httpx
 
 from fripe.config import Config, ConfigError, load_config, setup_logging
-from fripe.llm import build_backend
+from fripe.llm import LLMError, build_backend
 from fripe.pipeline import Deps, process_link
 from fripe.rerank import build_reranker
 from fripe.tiktok import download_slides, fetch_slides, find_tiktok_url
@@ -38,6 +38,10 @@ def _build_deps(cfg: Config) -> Deps:
 
 async def _close_deps(deps: Deps) -> None:
     await deps.vinted.close()
+    # Le backend API possede son propre pool HTTP ; celui de l'Agent SDK non.
+    closer = getattr(deps.backend, "aclose", None)
+    if closer is not None:
+        await closer()
     await deps.http.aclose()
 
 
@@ -173,6 +177,10 @@ def main() -> None:
 
     try:
         raise SystemExit(asyncio.run(args.func(cfg, args)))
+    except LLMError as exc:
+        # Paquet manquant ou jeton invalide : inutile d'afficher une trace.
+        print(getattr(exc, "user_message_fr", str(exc)), file=sys.stderr)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         raise SystemExit(130) from None
 

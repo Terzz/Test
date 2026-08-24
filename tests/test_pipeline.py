@@ -43,7 +43,7 @@ class FakeReranker:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def rank(self, source, candidates):
+    async def rank(self, source, candidates, **kwargs):
         self.calls += 1
         return list(reversed(candidates))
 
@@ -105,6 +105,7 @@ async def test_echelle_relache_la_couleur_puis_les_filtres(tmp_path):
 
     items, note = await _search_garment(garment, make_config(tmp_path), make_deps(vinted))
 
+    # Les resultats elargis se rangent derriere les precis, jamais entrelaces.
     assert [item.id for item in items] == [1, 2, 3, 4]
     assert note == "recherche élargie : filtres ignorés"
     # 1) filtres complets, 2) sans couleur, 3) texte seul
@@ -196,7 +197,7 @@ async def test_process_link_refuse_un_lien_non_tiktok(tmp_path, stub_stages):
 
 async def test_process_link_survit_a_un_reclassement_casse(tmp_path, stub_stages):
     class BrokenReranker:
-        async def rank(self, source, candidates):
+        async def rank(self, source, candidates, **kwargs):
             raise RuntimeError("modèle indisponible")
 
     vinted = FakeVinted([[make_item(i) for i in range(1, 11)], [make_item(i) for i in range(20, 30)]])
@@ -207,3 +208,15 @@ async def test_process_link_survit_a_un_reclassement_casse(tmp_path, stub_stages
     )
     # Repli sur l'ordre de pertinence de Vinted, sans interrompre la recherche.
     assert [item.id for item in results[0].items] == [1, 2]
+
+
+def test_slide_for_suit_les_numeros_pas_les_positions(tmp_path):
+    from fripe.pipeline import _slide_for
+
+    # La slide 02 n'a pas pu etre telechargee : la liste a un trou.
+    paths = [tmp_path / "01.jpg", tmp_path / "03.jpg"]
+    assert _slide_for(paths, 1).name == "01.jpg"
+    assert _slide_for(paths, 3).name == "03.jpg"
+    # Numero absent ou farfelu : on retombe sur la premiere slide disponible.
+    assert _slide_for(paths, 2).name == "01.jpg"
+    assert _slide_for(paths, 99).name == "01.jpg"

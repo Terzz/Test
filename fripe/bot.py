@@ -27,6 +27,7 @@ from fripe.pipeline import Deps, process_link
 from fripe.rerank import build_reranker
 from fripe.tiktok import NotATikTokUrl, TikTokError, find_tiktok_url
 from fripe.vinted import VintedClient, VintedError
+from fripe.vision import VisionError
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,10 @@ async def _post_shutdown(app: Application) -> None:
     if deps is None:
         return
     await deps.vinted.close()
+    # Le backend API possede son propre pool HTTP ; celui de l'Agent SDK non.
+    closer = getattr(deps.backend, "aclose", None)
+    if closer is not None:
+        await closer()
     await deps.http.aclose()
 
 
@@ -130,7 +135,7 @@ async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, sta
     async with locks[chat_id], semaphore:
         try:
             results = await process_link(text, cfg, deps, progress)
-        except (NotATikTokUrl, TikTokError, VintedError, LLMError) as exc:
+        except (NotATikTokUrl, TikTokError, VintedError, LLMError, VisionError) as exc:
             user_message = getattr(exc, "user_message_fr", None) or "Ça n'a pas marché 😕"
             log.info("echec utilisateur (%s) : %s", type(exc).__name__, exc)
             await status.edit_text(user_message)

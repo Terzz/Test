@@ -32,11 +32,15 @@ __all__ = [
 BASE_URL = "https://www.vinted.fr"
 SEARCH_URL = f"{BASE_URL}/api/v2/catalog/items"
 
-# Le fingerprint TLS de curl_cffi et cet en-tete doivent rester coherents, et les
-# cookies obtenus sont lies a l'UA : ne pas modifier l'un sans invalider le cache.
+# curl_cffi remplit sec-ch-ua / sec-ch-ua-platform depuis le profil impersone, mais
+# laisse passer notre User-Agent : les deux doivent decrire le meme navigateur (meme
+# version, meme plateforme), sinon l'anti-bot de Vinted voit un UA Windows a cote
+# d'un sec-ch-ua-platform "macOS". La valeur ci-dessous est celle du profil sur lequel
+# "chrome" pointe dans curl_cffi 0.16 ; a re-verifier a chaque montee de version.
+# Les cookies sont lies a cet UA : le changer invalide le cache disque tout seul.
 CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 )
 IMPERSONATE = "chrome"
 
@@ -249,7 +253,13 @@ class VintedClient:
         if status >= 400:
             raise VintedError(
                 f"HTTP {status} sur {BASE_URL}/ pendant le bootstrap",
-                user_message_fr=_AUTH_FR if status in (401, 403, 429) else _GENERIC_FR,
+                user_message_fr=(
+                    _RATE_FR
+                    if status == 429
+                    else _AUTH_FR
+                    if status in (401, 403)
+                    else _GENERIC_FR
+                ),
             )
 
         self._ready_at = time.time()

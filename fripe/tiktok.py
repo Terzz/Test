@@ -60,7 +60,6 @@ TIKTOK_URL_RE = re.compile(
 _POST_ID_RE = re.compile(r"/(?:photo|video)/(\d+)")
 _TRAILING_PUNCT = ".,;:!?)]}\"'»>"
 
-# Serialise les appels tikwm entre coroutines concurrentes.
 _TIKWM_LOCK = asyncio.Lock()
 _last_tikwm_call = 0.0
 
@@ -145,11 +144,17 @@ async def download_slides(
 ) -> list[Path]:
     """Telecharge les slides dans `dest` sous la forme `01.jpg`, `02.jpg`, ...
 
+    Le numero du fichier est la position 1-based dans `post.image_urls` (celle
+    que Garment.slide_index designe), pas le rang dans la liste renvoyee : une
+    slide en echec laisse un trou (`01.jpg`, `03.jpg`).
+
     Les echecs isoles sont ignores ; ExtractorDown n'est levee que si aucune
     slide n'a pu etre recuperee.
     """
-    urls = [u for u in post.image_urls if u][: max(0, max_slides)]
-    if not urls:
+    slides = [(i, u) for i, u in enumerate(post.image_urls, start=1) if u][
+        : max(0, max_slides)
+    ]
+    if not slides:
         raise ExtractorDown(f"post {post.post_id} sans image a telecharger")
 
     dest.mkdir(parents=True, exist_ok=True)
@@ -162,7 +167,7 @@ async def download_slides(
             results = await asyncio.gather(
                 *(
                     _download_one(client, semaphore, url, dest / f"{index:02d}.jpg")
-                    for index, url in enumerate(urls, start=1)
+                    for index, url in slides
                 )
             )
     finally:
@@ -172,7 +177,7 @@ async def download_slides(
     if not paths:
         raise ExtractorDown(f"aucune slide telechargeable pour le post {post.post_id}")
 
-    log.info("%d/%d slides telechargees dans %s", len(paths), len(urls), dest)
+    log.info("%d/%d slides telechargees dans %s", len(paths), len(slides), dest)
     return paths
 
 
