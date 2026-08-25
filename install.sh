@@ -24,7 +24,14 @@ demander() {
     fi
     printf '  %s : ' "$question"
     read -r reponse </dev/tty || echec "lecture interrompue"
-    [ -n "$reponse" ] || { alerte "Rien saisi, on passe. Tu pourras compléter $cle dans .env." ; return 0 ; }
+    if [ -z "$reponse" ]; then
+        # Sans ce jeton le bot ne demarre pas : on redemande une fois plutot
+        # que de laisser filer une installation muette et incomplete.
+        alerte "Rien n'a été collé — et sans ça le bot ne pourra pas démarrer."
+        printf '  %s : ' "$question"
+        read -r reponse </dev/tty || reponse=""
+    fi
+    [ -n "$reponse" ] || { alerte "On passe. Tu pourras compléter $cle dans .env." ; return 0 ; }
     ecrire_env "$cle" "$reponse"
     ok "$cle enregistré dans .env"
 }
@@ -123,6 +130,11 @@ else
     info "Installe-le avec :  curl -fsSL https://claude.ai/install.sh | bash"
     info "Puis lance :        claude setup-token"
 fi
+# Apres l'affichage de claude setup-token, la demande de collage se noie dans
+# sa sortie : on la detache visuellement.
+printf '\n%s\n' "${DIM}────────────────────────────────────────────────────────${OFF}"
+info "${BOLD}Copie le jeton affiché juste au-dessus${OFF} (il commence par sk-ant-oat01-)"
+info "et colle-le ici : il n'est enregistré nulle part automatiquement."
 printf '\n'
 demander CLAUDE_CODE_OAUTH_TOKEN "Colle le jeton Claude (sk-ant-oat01-…)"
 
@@ -147,7 +159,37 @@ else
     alerte "Jeton Claude manquant : vérification sautée."
 fi
 
-# ── C'est prêt ────────────────────────────────────────────────────────────────
+# ── Bilan ────────────────────────────────────────────────────────────────────
+MANQUANTS=""
+[ -n "$(valeur_env TELEGRAM_BOT_TOKEN)" ] || MANQUANTS="$MANQUANTS TELEGRAM_BOT_TOKEN"
+if [ "$(valeur_env LLM_BACKEND)" != "anthropic_api" ]; then
+    [ -n "$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)" ] || MANQUANTS="$MANQUANTS CLAUDE_CODE_OAUTH_TOKEN"
+else
+    [ -n "$(valeur_env ANTHROPIC_API_KEY)" ] || MANQUANTS="$MANQUANTS ANTHROPIC_API_KEY"
+fi
+
+if [ -n "$MANQUANTS" ]; then
+    titre "Installation incomplète"
+    info "Le projet est installé, mais le bot ${BOLD}ne démarrera pas${OFF} sans ceci :"
+    printf '\n'
+    for cle in $MANQUANTS; do
+        case "$cle" in
+            TELEGRAM_BOT_TOKEN)
+                printf '  %s✗%s %s — le jeton donné par @BotFather sur Telegram\n' "$RED" "$OFF" "$cle" ;;
+            CLAUDE_CODE_OAUTH_TOKEN)
+                printf '  %s✗%s %s — lance « claude setup-token » et copie le jeton affiché\n' "$RED" "$OFF" "$cle" ;;
+            ANTHROPIC_API_KEY)
+                printf '  %s✗%s %s — ta clé API sur platform.claude.com\n' "$RED" "$OFF" "$cle" ;;
+        esac
+    done
+    printf '\n'
+    info "Deux façons de compléter :"
+    info "  • relance ${BOLD}./install.sh${OFF} (il ne retouchera pas ce qui est déjà bon), ou"
+    info "  • ouvre le fichier ${BOLD}.env${OFF} et renseigne la ligne concernée."
+    printf '\n'
+    exit 1
+fi
+
 titre "C'est prêt"
 
 printf '  Lancer le bot :        %s./start.sh%s\n' "$BOLD" "$OFF"
