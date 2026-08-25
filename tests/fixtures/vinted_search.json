@@ -1,0 +1,59 @@
+{
+  "items": [
+    {
+      "id": 9765188206,
+      "title": "Veste en cuir marron vintage",
+      "url": "https://www.vinted.fr/items/9765188206-veste-en-cuir-marron-vintage",
+      "path": "/items/9765188206",
+      "price": {"amount": "25.0", "currency_code": "EUR"},
+      "brand_title": "Zara",
+      "size_title": "M / 38 / 10",
+      "status": "Très bon état",
+      "photo": {
+        "url": "https://images1.vinted.net/t/photo-full.jpeg",
+        "full_size_url": "https://images1.vinted.net/t/photo-full.jpeg",
+        "dominant_color": "#5a3b25",
+        "thumbnails": [
+          {"type": "thumb50", "url": "https://images1.vinted.net/t/thumb50.jpeg", "width": 50, "height": 50},
+          {"type": "thumb310", "url": "https://images1.vinted.net/t/thumb310.jpeg", "width": 310, "height": 430},
+          {"type": "thumb150", "url": "https://images1.vinted.net/t/thumb150.jpeg", "width": 150, "height": 210}
+        ]
+      },
+      "user": {"id": 42, "login": "sandrine_59", "business": false},
+      "favourite_count": 12,
+      "view_count": 340
+    },
+    {
+      "id": 9765188207,
+      "title": "Blouson cuir camel",
+      "url": "https://www.vinted.fr/items/9765188207-blouson-cuir-camel",
+      "price": {"amount": "40.00", "currency_code": "EUR"},
+      "brand_title": null,
+      "size_title": "L",
+      "status": "Bon état",
+      "photo": {
+        "url": "https://images1.vinted.net/t/photo2.jpeg",
+        "thumbnails": []
+      },
+      "user": {"id": 43, "login": "marc.p"}
+    },
+    {
+      "id": 9765188208,
+      "title": "Veste marron sans prix",
+      "url": "https://www.vinted.fr/items/9765188208-veste-marron",
+      "price": {"amount": null, "currency_code": "EUR"},
+      "photo": {},
+      "user": {}
+    },
+    {
+      "titre_casse": "annonce sans id ni titre exploitables"
+    }
+  ],
+  "pagination": {
+    "current_page": 1,
+    "total_pages": 5,
+    "total_entries": 133,
+    "per_page": 32,
+    "time": 1756049000
+  }
+}

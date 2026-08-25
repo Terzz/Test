@@ -1,0 +1,33 @@
+[project]
+name = "fripe"
+version = "0.1.0"
+description = "Bot Telegram : diaporama TikTok d'outfits -> annonces Vinted correspondantes"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot~=22.8",
+    "claude-agent-sdk>=0.2.144",
+    "anthropic>=0.40",
+    "curl_cffi>=0.7",
+    "httpx>=0.27",
+    "Pillow>=10.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    "gallery-dl>=1.29.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+fripe = "fripe.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fripe*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
