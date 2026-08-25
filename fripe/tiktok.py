@@ -37,7 +37,13 @@ _API_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    # Sans Referer/Origin, la protection anti-bot devant tikwm repond 403.
+    "Referer": "https://www.tikwm.com/",
+    "Origin": "https://www.tikwm.com",
 }
+# UA que yt-dlp emploie pour deplier les liens vm.tiktok.com sans tomber
+# sur une page interstitielle.
+_UNFURL_HEADERS = {"User-Agent": "facebookexternalhit/1.1"}
 _IMAGE_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8",
@@ -128,6 +134,22 @@ async def fetch_slides(share_url: str) -> SlidePost:
         reasons.append(f"tikwm: {exc}")
         log.warning("tikwm a echoue pour %s : %s", url, exc)
 
+    # Un lien court est parfois refuse la ou l'URL canonique passe.
+    canonique = await _resolve_short_url(url)
+    if canonique and canonique != url:
+        try:
+            return await _fetch_via_tikwm(canonique)
+        except VideoPost:
+            raise
+        except Exception as exc:
+            reasons.append(f"tikwm (URL canonique): {exc}")
+            log.warning("tikwm a echoue pour %s : %s", canonique, exc)
+
+    # Les deux extracteurs peuvent echouer simplement parce que le post est une
+    # video : le dire vaut mieux que d'accuser le service.
+    if canonique and "/video/" in canonique:
+        raise VideoPost(f"{canonique} est une video, pas un diaporama")
+
     try:
         return await _fetch_via_gallery_dl(url)
     except VideoPost:
@@ -203,16 +225,57 @@ async def _throttle_tikwm() -> None:
         _last_tikwm_call = time.monotonic()
 
 
-async def _fetch_via_tikwm(url: str) -> SlidePost:
-    await _throttle_tikwm()
+async def _resolve_short_url(url: str) -> str | None:
+    """Deplie vm.tiktok.com vers l'URL canonique /@auteur/photo/123."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT_S, follow_redirects=True, headers=_UNFURL_HEADERS
+        ) as client:
+            response = await client.head(url)
+        final = str(response.url).split("?")[0]
+    except Exception as exc:
+        log.debug("depliage impossible pour %s : %s", url, exc)
+        return None
+    return final if _POST_ID_RE.search(final) else None
 
+
+async def _tikwm_via_curl_cffi(url: str) -> dict:
+    """Transport principal : httpx a une empreinte TLS non-navigateur, souvent 403."""
+    from curl_cffi.requests import AsyncSession
+
+    async with AsyncSession(impersonate="chrome") as session:
+        response = await session.get(
+            TIKWM_API, params={"url": url}, headers=_API_HEADERS, timeout=_HTTP_TIMEOUT_S
+        )
+    if response.status_code != 200:
+        raise ValueError(f"HTTP {response.status_code}")
+    return response.json()
+
+
+async def _tikwm_via_httpx(url: str) -> dict:
     async with httpx.AsyncClient(
         timeout=_HTTP_TIMEOUT_S, follow_redirects=True, headers=_API_HEADERS
     ) as client:
         response = await client.get(TIKWM_API, params={"url": url})
     response.raise_for_status()
+    return response.json()
 
-    payload = response.json()
+
+async def _fetch_via_tikwm(url: str) -> SlidePost:
+    await _throttle_tikwm()
+
+    echecs: list[str] = []
+    payload = None
+    for nom, transport in (("curl_cffi", _tikwm_via_curl_cffi), ("httpx", _tikwm_via_httpx)):
+        try:
+            payload = await transport(url)
+            break
+        except Exception as exc:
+            echecs.append(f"{nom}: {exc}")
+            log.debug("tikwm via %s a echoue : %s", nom, exc)
+    if payload is None:
+        raise ValueError(" | ".join(echecs))
+
     if not isinstance(payload, dict):
         raise ValueError(f"reponse tikwm inattendue ({type(payload).__name__})")
 

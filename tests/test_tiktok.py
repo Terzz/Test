@@ -34,6 +34,17 @@ def fake_http(monkeypatch):
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
     monkeypatch.setattr(tiktok.httpx, "AsyncClient", factory)
+
+    # curl_cffi et le depliage d'URL sortiraient du transport simule : on les
+    # ecarte pour que les tests exercent le chemin httpx mocke.
+    async def pas_de_curl_cffi(url):
+        raise RuntimeError("curl_cffi indisponible en test")
+
+    async def pas_de_depliage(url):
+        return None
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", pas_de_curl_cffi)
+    monkeypatch.setattr(tiktok, "_resolve_short_url", pas_de_depliage)
     return routes
 
 
@@ -130,3 +141,66 @@ async def test_download_slides_tout_en_echec(fake_http, tmp_path):
     post = SlidePost(post_id="44", image_urls=["https://cdn.example/slide-1.jpeg"])
     with pytest.raises(ExtractorDown):
         await tiktok.download_slides(post, tmp_path / "44")
+
+
+async def test_fetch_slides_prefere_curl_cffi(monkeypatch, tikwm_photo):
+    """curl_cffi passe en premier : c'est lui qui contourne les 403 anti-bot."""
+    appels: list[str] = []
+
+    async def faux_curl_cffi(url):
+        appels.append(url)
+        return tikwm_photo
+
+    async def httpx_interdit(url):
+        raise AssertionError("httpx ne doit pas etre appele si curl_cffi repond")
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", faux_curl_cffi)
+    monkeypatch.setattr(tiktok, "_tikwm_via_httpx", httpx_interdit)
+
+    post = await tiktok.fetch_slides("https://vm.tiktok.com/ZGdxGpLHD/")
+
+    assert appels == ["https://vm.tiktok.com/ZGdxGpLHD/"]
+    assert len(post.image_urls) == len(tikwm_photo["data"]["images"])
+
+
+async def test_fetch_slides_retente_avec_l_url_canonique(monkeypatch, tikwm_photo):
+    """Un lien court refuse peut passer sous sa forme /@auteur/photo/123."""
+    vus: list[str] = []
+
+    async def curl_cffi_selectif(url):
+        vus.append(url)
+        if url.startswith("https://vm."):
+            raise ValueError("HTTP 403")
+        return tikwm_photo
+
+    async def httpx_ko(url):
+        raise ValueError("HTTP 403")
+
+    async def depliage(url):
+        return "https://www.tiktok.com/@qui/photo/7369836402751671585"
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", curl_cffi_selectif)
+    monkeypatch.setattr(tiktok, "_tikwm_via_httpx", httpx_ko)
+    monkeypatch.setattr(tiktok, "_resolve_short_url", depliage)
+
+    post = await tiktok.fetch_slides("https://vm.tiktok.com/ZGdxGpLHD/")
+
+    assert vus[-1] == "https://www.tiktok.com/@qui/photo/7369836402751671585"
+    assert post.image_urls
+
+
+async def test_fetch_slides_annonce_une_video_quand_le_lien_court_en_cache_une(monkeypatch):
+    """Le lien court ne dit rien : deplie, il revele /video/ et non /photo/."""
+    async def tikwm_ko(url):
+        raise ValueError("HTTP 403")
+
+    async def depliage(url):
+        return "https://www.tiktok.com/@qui/video/7369836402751671585"
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", tikwm_ko)
+    monkeypatch.setattr(tiktok, "_tikwm_via_httpx", tikwm_ko)
+    monkeypatch.setattr(tiktok, "_resolve_short_url", depliage)
+
+    with pytest.raises(tiktok.VideoPost) as exc:
+        await tiktok.fetch_slides("https://vm.tiktok.com/ZGdxGpLHD/")
+    assert "diaporama" in exc.value.user_message_fr
