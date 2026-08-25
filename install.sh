@@ -161,8 +161,17 @@ info "${DIM}Laisser vide = ouvert à tout le monde, déconseillé.${OFF}"
 # ── 6. Vérification ───────────────────────────────────────────────────────────
 titre "6. Vérification"
 
+# On ne teste que si la cle attendue PAR CE BACKEND est presente : lancer
+# llm-ping avec la mauvaise cle produirait une erreur de configuration
+# deguisee en jeton refuse.
 VERIF_KO=""
-if [ -n "$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)" ] || [ -n "$(valeur_env ANTHROPIC_API_KEY)" ]; then
+BACKEND_IA="$(valeur_env LLM_BACKEND)"
+if [ "$BACKEND_IA" = "anthropic_api" ]; then
+    CRED_PRETE="$(valeur_env ANTHROPIC_API_KEY)"
+else
+    CRED_PRETE="$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)"
+fi
+if [ -n "$CRED_PRETE" ]; then
     # Un jeton invalide met jusqu'a deux minutes a etre rejete : sans ce mot,
     # l'attente ressemble a un blocage.
     info "Test de l'accès à Claude — jusqu'à deux minutes, c'est normal…"
@@ -191,6 +200,8 @@ if [ -n "$VERIF_KO" ]; then
     info "Pour repartir sur un jeton neuf :"
     info "  ${BOLD}claude setup-token${OFF}   puis relance ${BOLD}./install.sh${OFF}"
     info "Au moment de coller, sélectionne les deux lignes du jeton, entièrement."
+    info "Vérifie aussi ${BOLD}LLM_BACKEND${OFF} dans .env : agent_sdk attend"
+    info "CLAUDE_CODE_OAUTH_TOKEN, anthropic_api attend ANTHROPIC_API_KEY."
     printf '\n'
     exit 1
 fi

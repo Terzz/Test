@@ -95,8 +95,12 @@ def load_config(require_telegram: bool = True) -> Config:
             f"(recu : {raw_ids!r})"
         ) from exc
 
-    max_results = _int_or_none(os.getenv("MAX_RESULTS_PER_GARMENT"), "MAX_RESULTS_PER_GARMENT") or 6
-    # Telegram n'accepte qu'entre 2 et 10 medias par album.
+    max_results = _int_or_none(os.getenv("MAX_RESULTS_PER_GARMENT"), "MAX_RESULTS_PER_GARMENT")
+    if max_results is None:
+        max_results = 6
+    # Telegram n'accepte qu'entre 2 et 10 medias par album ; un 0 explicite
+    # est clampe comme n'importe quelle valeur hors bornes (pas ecrase par
+    # le defaut, ce que ferait un `or 6`).
     max_results = max(2, min(10, max_results))
 
     reranker = (os.getenv("RERANKER") or "claude").strip()

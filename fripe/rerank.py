@@ -152,18 +152,12 @@ class ClaudeReranker:
 def build_reranker(cfg: Config, backend: LLMBackend, http: httpx.AsyncClient) -> Reranker:
     """Construit le re-classeur demande par la config, avec repli sur Claude."""
     if cfg.reranker == "siglip":
-        try:
-            # Import tardif : l'extra `siglip` (torch, open_clip) est optionnel.
-            from fripe.siglip import SiglipReranker
-
-            return SiglipReranker(http)
-        except ImportError:
-            log.warning(
-                "RERANKER=siglip mais l'extra n'est pas installe "
-                "(pip install '.[siglip]') : repli sur le re-classement Claude."
-            )
-        except Exception:
-            log.warning("SiglipReranker inutilisable : repli sur Claude.", exc_info=True)
+        # Le module fripe.siglip n'a jamais ete ecrit : mieux vaut le dire que
+        # laisser croire qu'un extra manquant est en cause.
+        log.warning(
+            "RERANKER=siglip n'est pas encore disponible dans cette version : "
+            "repli sur le re-classement Claude."
+        )
     return ClaudeReranker(backend, cfg.rerank_model, http)
 
 

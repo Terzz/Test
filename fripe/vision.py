@@ -114,7 +114,10 @@ async def analyze_slides(
     que fatale, quitte a ne garder qu'une partie des vetements.
     """
     images: list[ImagePart] = []
-    # Position envoyee au modele -> index 1-based dans slide_paths.
+    # Position envoyee au modele -> NUMERO de slide (le nom du fichier, 01.jpg).
+    # Les echecs de telechargement laissent des trous : la position dans la
+    # liste ne correspond alors plus au numero, et c'est le numero que
+    # pipeline._slide_for utilise pour retrouver la photo du crop.
     origins: list[int] = []
     for index, path in enumerate(slide_paths, start=1):
         try:
@@ -123,7 +126,7 @@ async def analyze_slides(
             log.warning("slide illisible, ignoree : %s", path)
             continue
         images.append(part)
-        origins.append(index)
+        origins.append(int(path.stem) if path.stem.isdigit() else index)
 
     if not images:
         raise VisionError(f"aucune slide exploitable parmi {len(slide_paths)}")

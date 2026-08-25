@@ -50,7 +50,12 @@ titre "2. Configuration (.env)"
 
 valeur() { [ -f .env ] && sed -n "s/^$1=//p" .env | head -1; }
 
-for cle in TELEGRAM_BOT_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+# La cle IA attendue depend du backend configure.
+BACKEND_IA="$(valeur LLM_BACKEND)"
+if [ "$BACKEND_IA" = "anthropic_api" ]; then CLE_IA=ANTHROPIC_API_KEY; else CLE_IA=CLAUDE_CODE_OAUTH_TOKEN; fi
+info "backend IA : ${BACKEND_IA:-agent_sdk}"
+
+for cle in TELEGRAM_BOT_TOKEN "$CLE_IA"; do
     if [ -n "$(valeur "$cle")" ]; then
         ok "$cle renseigne ($(valeur "$cle" | wc -c | tr -d ' ') caracteres)"
     else
@@ -66,11 +71,11 @@ else
     note "bot ouvert a tout le monde (ALLOWED_CHAT_IDS vide)"
 fi
 
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+if [ "$BACKEND_IA" != "anthropic_api" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     ko "ANTHROPIC_API_KEY presente dans l'environnement : elle facturerait des credits API"
     note "ANTHROPIC_API_KEY traine dans l'environnement"
 else
-    ok "pas d'ANTHROPIC_API_KEY parasite"
+    ok "pas de cle API parasite pour ce backend"
 fi
 
 # ── 3. Telegram ───────────────────────────────────────────────────────────────

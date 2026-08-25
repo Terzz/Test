@@ -374,14 +374,14 @@ class AnthropicAPIBackend(_VisionBackend):
         log.info("appel API Anthropic : modele=%s images=%d", model, len(parts))
         started = time.monotonic()
         try:
-            response = await asyncio.wait_for(
-                self._client.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": content}],
-                ),
-                self._timeout,
+            # Pas de wait_for externe : le client a deja son propre timeout par
+            # tentative, et un delai global identique annulerait ses retries
+            # automatiques (429, 5xx) en plein backoff.
+            response = await self._client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": content}],
             )
         except _TIMEOUT_ERRORS as exc:
             raise LLMError(

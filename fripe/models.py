@@ -144,7 +144,7 @@ class VintedItem(BaseModel):
             return "prix inconnu"
         symbol = "€" if self.currency == "EUR" else f" {self.currency}"
         amount = f"{self.price_amount:.2f}".rstrip("0").rstrip(".")
-        return f"{amount}{symbol}" if symbol == "€" else f"{amount}{symbol}"
+        return f"{amount}{symbol}"
 
 
 def _pick_thumbnail(photo: dict[str, Any], target: int = 310) -> str | None:

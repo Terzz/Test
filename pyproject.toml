@@ -16,7 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-siglip = ["open_clip_torch>=2.24", "torch>=2.2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]

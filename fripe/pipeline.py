@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 
@@ -158,8 +159,12 @@ async def _search_garment(
             brand_ids=brand_ids,
             price_to=cfg.price_to,
         )
+        # La note n'a de sens que si l'elargissement a vraiment apporte des
+        # annonces que l'utilisateur voit.
+        avant = len(pooled)
         pooled = _append_dedup(pooled, widened)
-        note = "recherche élargie : couleur ignorée"
+        if len(pooled) > avant:
+            note = "recherche élargie : couleur ignorée"
 
     if len(pooled) >= MIN_RESULTS:
         return pooled, note
@@ -172,8 +177,9 @@ async def _search_garment(
         brand_ids=None,
         price_to=cfg.price_to,
     )
+    avant = len(pooled)
     pooled = _append_dedup(pooled, widened)
-    if widened:
+    if len(pooled) > avant:
         note = "recherche élargie : filtres ignorés"
     return pooled, note
 
@@ -223,7 +229,10 @@ async def process_link(
         raise NotATikTokUrl("aucun lien TikTok dans le message")
 
     post = await fetch_slides(share_url)
-    slides_dir = cfg.data_dir / "slides" / post.post_id
+    # Suffixe unique : deux recherches simultanees du meme post ne doivent pas
+    # partager le dossier, le rmtree du premier fini supprimerait les slides
+    # de l'autre en pleine analyse.
+    slides_dir = cfg.data_dir / "slides" / f"{post.post_id}-{uuid4().hex[:8]}"
     try:
         slide_paths = await download_slides(post, slides_dir)
         await _safe_progress(

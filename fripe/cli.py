@@ -178,8 +178,11 @@ def main() -> None:
     try:
         raise SystemExit(asyncio.run(args.func(cfg, args)))
     except LLMError as exc:
-        # Paquet manquant ou jeton invalide : inutile d'afficher une trace.
+        # Pas de trace, mais la cause technique reste affichee : c'est elle
+        # qui distingue un jeton tronque d'un jeton revoque ou d'une panne
+        # reseau dans un rapport de diagnostic.
         print(getattr(exc, "user_message_fr", str(exc)), file=sys.stderr)
+        print(f"détail : {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     except KeyboardInterrupt:
         raise SystemExit(130) from None

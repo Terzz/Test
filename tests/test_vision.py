@@ -131,3 +131,20 @@ async def test_analyze_slides_refuse_des_photos_illisibles(tmp_path):
     with pytest.raises(VisionError) as exc:
         await analyze_slides([cassee], FakeBackend({"garments": []}), "claude-opus-5")
     assert exc.value.user_message_fr
+
+
+async def test_analyze_slides_suit_les_numeros_de_fichier(tmp_path):
+    """La slide 02 a echoue au telechargement : slide_index doit suivre les
+    numeros de fichier, pas les positions dans la liste."""
+    un = tmp_path / "01.jpg"
+    un.write_bytes(make_jpeg(400, 500))
+    trois = tmp_path / "03.jpg"
+    trois.write_bytes(make_jpeg(400, 500))
+
+    backend = FakeBackend(
+        {"garments": [{"id": "g1", "label_fr": "veste", "queries_fr": ["veste"], "slide_index": 2}]}
+    )
+    result = await analyze_slides([un, trois], backend, "claude-opus-5")
+
+    # L'image 2 envoyee au modele est le fichier 03.jpg.
+    assert result.garments[0].slide_index == 3

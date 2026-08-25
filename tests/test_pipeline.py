@@ -220,3 +220,15 @@ def test_slide_for_suit_les_numeros_pas_les_positions(tmp_path):
     # Numero absent ou farfelu : on retombe sur la premiere slide disponible.
     assert _slide_for(paths, 2).name == "01.jpg"
     assert _slide_for(paths, 99).name == "01.jpg"
+
+
+async def test_pas_de_note_quand_l_elargissement_n_apporte_rien(tmp_path):
+    # 4 resultats precis ; l'elargissement couleur ne renvoie que des doublons.
+    memes = [make_item(i) for i in range(1, 5)]
+    vinted = FakeVinted([list(memes), list(memes)])
+    garment = Garment(id="g1", label_fr="veste", queries_fr=["veste cuir"], color_ids=[2])
+
+    items, note = await _search_garment(garment, make_config(tmp_path), make_deps(vinted))
+
+    assert [item.id for item in items] == [1, 2, 3, 4]
+    assert note is None

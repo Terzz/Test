@@ -154,8 +154,22 @@ async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, sta
         except Exception:
             log.debug("suppression du message de statut impossible", exc_info=True)
 
+        # Un envoi rate (reseau, flood) ne doit pas emporter les albums
+        # suivants : l'analyse a deja ete payee pour chacun d'eux.
+        rates = 0
         for result in results:
-            await send_garment_album(update.message, result, deps.http)
+            try:
+                await send_garment_album(update.message, result, deps.http)
+            except Exception:
+                rates += 1
+                log.exception("envoi de l'album %r en echec", result.garment.label_fr)
+        if rates:
+            try:
+                await update.message.reply_text(
+                    f"⚠️ {rates} album(s) n'ont pas pu être envoyés, désolé."
+                )
+            except Exception:
+                log.debug("impossible de signaler les albums perdus", exc_info=True)
 
 
 def build_caption(result: GarmentResult) -> str:
@@ -227,7 +241,8 @@ async def send_garment_album(message, result: GarmentResult, http: httpx.AsyncCl
 
     items = [item for item in result.items if item.photo_url]
     if len(items) < 2:
-        await _send_single(message, result.items[0], caption, http)
+        # De preference l'item qui a une photo, meme s'il n'est pas premier.
+        await _send_single(message, items[0] if items else result.items[0], caption, http)
         return
 
     try:
