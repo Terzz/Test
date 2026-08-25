@@ -15,25 +15,33 @@ echec()   { printf '%s✗%s %s\n' "$RED" "$OFF" "$1" >&2; exit 1; }
 
 # Demande une valeur en gardant celle qui existe deja dans .env.
 demander() {
-    local cle="$1" question="$2" actuelle reponse
+    local cle="$1" question="$2" motif="${3:-}" conseil="${4:-}" actuelle reponse essai
     actuelle="$(valeur_env "$cle")"
     if [ -n "$actuelle" ]; then
         printf '  %s est déjà renseigné. Le remplacer ? [o/N] ' "$cle"
         read -r reponse </dev/tty || reponse=""
         case "$reponse" in [oOyY]*) ;; *) info "On garde la valeur existante." ; return 0 ;; esac
     fi
-    printf '  %s : ' "$question"
-    read -r reponse </dev/tty || echec "lecture interrompue"
-    if [ -z "$reponse" ]; then
-        # Sans ce jeton le bot ne demarre pas : on redemande une fois plutot
-        # que de laisser filer une installation muette et incomplete.
-        alerte "Rien n'a été collé — et sans ça le bot ne pourra pas démarrer."
+    for essai in 1 2 3; do
         printf '  %s : ' "$question"
         read -r reponse </dev/tty || reponse=""
-    fi
-    [ -n "$reponse" ] || { alerte "On passe. Tu pourras compléter $cle dans .env." ; return 0 ; }
-    ecrire_env "$cle" "$reponse"
-    ok "$cle enregistré dans .env"
+        # Le jeton s'affiche sur plusieurs lignes dans le terminal : un copier-coller
+        # ramene souvent des espaces ou une coupure. Aucun jeton n'en contient.
+        reponse="$(printf '%s' "$reponse" | tr -d '[:space:]')"
+        if [ -z "$reponse" ]; then
+            alerte "Rien n'a été collé — sans ça le bot ne pourra pas démarrer."
+            continue
+        fi
+        if [ -n "$motif" ] && ! printf '%s' "$reponse" | grep -Eq "$motif"; then
+            alerte "Ce jeton n'a pas la forme attendue (il est probablement tronqué)."
+            [ -n "$conseil" ] && info "$conseil"
+            continue
+        fi
+        ecrire_env "$cle" "$reponse"
+        ok "$cle enregistré dans .env"
+        return 0
+    done
+    alerte "On passe. Tu pourras compléter $cle dans .env."
 }
 
 valeur_env() {
@@ -105,7 +113,9 @@ info "Sur ton téléphone, ouvre Telegram et écris à ${BOLD}@BotFather${OFF} :
 info "  envoie ${BOLD}/newbot${OFF}, choisis un nom, puis un identifiant finissant par « bot »."
 info "Il te répond avec un jeton du genre 123456:ABC-DEF…"
 printf '\n'
-demander TELEGRAM_BOT_TOKEN "Colle le jeton Telegram ici"
+demander TELEGRAM_BOT_TOKEN "Colle le jeton Telegram ici" \
+    '^[0-9]{6,}:[A-Za-z0-9_-]{30,}$' \
+    "Il ressemble à 123456789:AAG... — vérifie que tu as bien tout copié."
 
 # ── 4. L'accès à Claude ───────────────────────────────────────────────────────
 titre "4. Ton abonnement Claude"
@@ -136,7 +146,9 @@ printf '\n%s\n' "${DIM}───────────────────
 info "${BOLD}Copie le jeton affiché juste au-dessus${OFF} (il commence par sk-ant-oat01-)"
 info "et colle-le ici : il n'est enregistré nulle part automatiquement."
 printf '\n'
-demander CLAUDE_CODE_OAUTH_TOKEN "Colle le jeton Claude (sk-ant-oat01-…)"
+demander CLAUDE_CODE_OAUTH_TOKEN "Colle le jeton Claude (sk-ant-oat01-…)" \
+    '^sk-ant-oat01-.{40,}$' \
+    "Il s'affiche sur deux lignes : sélectionne bien les DEUX, de sk-ant jusqu'au tout dernier caractère."
 
 # ── 5. Réserver le bot à tes proches ──────────────────────────────────────────
 titre "5. Qui a le droit d'utiliser le bot"
@@ -149,14 +161,16 @@ info "${DIM}Laisser vide = ouvert à tout le monde, déconseillé.${OFF}"
 # ── 6. Vérification ───────────────────────────────────────────────────────────
 titre "6. Vérification"
 
-if [ -n "$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)" ]; then
+VERIF_KO=""
+if [ -n "$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)" ] || [ -n "$(valeur_env ANTHROPIC_API_KEY)" ]; then
+    # Un jeton invalide met jusqu'a deux minutes a etre rejete : sans ce mot,
+    # l'attente ressemble a un blocage.
+    info "Test de l'accès à Claude — jusqu'à deux minutes, c'est normal…"
     if ./.venv/bin/python -m fripe.cli llm-ping; then
         ok "L'accès à Claude fonctionne"
     else
-        alerte "L'accès à Claude n'a pas répondu. Vérifie CLAUDE_CODE_OAUTH_TOKEN dans .env."
+        VERIF_KO="oui"
     fi
-else
-    alerte "Jeton Claude manquant : vérification sautée."
 fi
 
 # ── Bilan ────────────────────────────────────────────────────────────────────
@@ -166,6 +180,19 @@ if [ "$(valeur_env LLM_BACKEND)" != "anthropic_api" ]; then
     [ -n "$(valeur_env CLAUDE_CODE_OAUTH_TOKEN)" ] || MANQUANTS="$MANQUANTS CLAUDE_CODE_OAUTH_TOKEN"
 else
     [ -n "$(valeur_env ANTHROPIC_API_KEY)" ] || MANQUANTS="$MANQUANTS ANTHROPIC_API_KEY"
+fi
+
+if [ -n "$VERIF_KO" ]; then
+    titre "Le jeton Claude est refusé"
+    info "Le jeton enregistré existe, mais Claude le rejette. Deux causes possibles :"
+    info "  • il a été ${BOLD}tronqué${OFF} au copier-coller (il s'affiche sur deux lignes) ;"
+    info "  • il a été ${BOLD}révoqué${OFF} depuis."
+    printf '\n'
+    info "Pour repartir sur un jeton neuf :"
+    info "  ${BOLD}claude setup-token${OFF}   puis relance ${BOLD}./install.sh${OFF}"
+    info "Au moment de coller, sélectionne les deux lignes du jeton, entièrement."
+    printf '\n'
+    exit 1
 fi
 
 if [ -n "$MANQUANTS" ]; then
