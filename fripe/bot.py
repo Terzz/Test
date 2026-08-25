@@ -162,7 +162,8 @@ def build_caption(result: GarmentResult) -> str:
     """Legende HTML de l'album : une ligne par annonce, tronquee a 1024 caracteres."""
     header = f"🧵 <b>{html.escape(result.garment.label_fr)}</b>"
     if result.items:
-        header += f" — {len(result.items)} annonce(s)"
+        pluriel = "s" if len(result.items) > 1 else ""
+        header += f" — {len(result.items)} annonce{pluriel}"
     if result.note_fr:
         header += f"\n<i>{html.escape(result.note_fr)}</i>"
 

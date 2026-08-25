@@ -59,3 +59,10 @@ def test_caption_sans_annonce():
     caption = build_caption(make_result([]))
     assert "veste en cuir marron" in caption
     assert "annonce" not in caption
+
+
+def test_caption_accorde_le_pluriel():
+    une = build_caption(make_result([make_item(1)]))
+    plusieurs = build_caption(make_result([make_item(1), make_item(2)]))
+    assert "1 annonce" in une and "1 annonces" not in une
+    assert "2 annonces" in plusieurs
