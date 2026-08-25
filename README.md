@@ -24,10 +24,29 @@ Lien TikTok → images des slides → analyse visuelle (Claude)
 - Sur Raspberry Pi : **un OS 64 bits obligatoire** (`uname -m` doit afficher `aarch64`). Il n'existe pas de version du SDK Claude pour les OS 32 bits.
 - Un abonnement **Claude Pro ou Max** (le bot utilise le crédit Agent SDK inclus dans l'abonnement), ou à défaut une clé API Anthropic.
 
-### 1. Le projet
+### Installation en une commande
 
 ```bash
 git clone <ce dépôt> fripe && cd fripe
+./install.sh
+```
+
+Le script vérifie ta machine, installe tout, puis te guide pas à pas pour les deux
+jetons (Telegram et Claude). Tu peux le relancer sans risque : il ne remplace
+jamais une valeur existante sans te demander.
+
+Ensuite, pour lancer le bot :
+
+```bash
+./start.sh
+```
+
+Le reste de cette section détaille ce que fait le script, si tu préfères le faire
+à la main ou comprendre chaque étape.
+
+### 1. Le projet
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install .
 cp .env.example .env
