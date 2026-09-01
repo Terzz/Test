@@ -26,3 +26,26 @@ def test_max_results_zero_est_clampe_pas_ecrase(env_minimal, monkeypatch):
 
 def test_max_results_defaut(env_minimal):
     assert load_config().max_results == 6
+
+
+def test_journal_tournant_quand_un_fichier_est_demande(tmp_path, monkeypatch):
+    from logging.handlers import RotatingFileHandler
+
+    from fripe.config import log_handlers
+
+    fichier = tmp_path / "logs" / "bot.log"
+    monkeypatch.setenv("FRIPE_LOG_FILE", str(fichier))
+    handlers = log_handlers()
+
+    assert handlers is not None and isinstance(handlers[0], RotatingFileHandler)
+    # Le dossier est cree : launchd ne le ferait pas a notre place.
+    assert fichier.parent.is_dir()
+    assert handlers[0].backupCount == 3
+    handlers[0].close()
+
+
+def test_console_par_defaut(monkeypatch):
+    from fripe.config import log_handlers
+
+    monkeypatch.delenv("FRIPE_LOG_FILE", raising=False)
+    assert log_handlers() is None

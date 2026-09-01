@@ -41,6 +41,9 @@ Ensuite, pour lancer le bot :
 ./start.sh
 ```
 
+Sur Mac, pour ne plus avoir à y penser (démarrage au login, rattrapage des liens
+reçus pendant que l'ordi était éteint) : `./autostart.sh` — voir plus bas.
+
 Le reste de cette section détaille ce que fait le script, si tu préfères le faire
 à la main ou comprendre chaque étape.
 
@@ -110,6 +113,26 @@ python -m fripe.cli run     https://vm.tiktok.com/XXXX/       # chaîne complèt
 ```
 
 ## Faire tourner en continu
+
+**Mac (démarrage automatique + rattrapage)** :
+
+```bash
+./autostart.sh
+```
+
+Le bot démarre à chaque ouverture de session et redémarre s'il plante. Les liens
+envoyés pendant que le Mac était éteint sont traités au réveil : Telegram les
+garde 24 heures. Le Mac verrouillé convient ; en veille, le bot est en pause et
+reprend au réveil.
+
+```bash
+./autostart.sh status     # l'état et les dernières lignes du journal
+./autostart.sh logs       # le journal en direct
+./autostart.sh restart    # après un git pull
+./autostart.sh off        # retire le démarrage automatique
+```
+
+Le journal est dans `data/logs/bot.log` (tournant, 3 × 2 Mo maximum).
 
 **systemd** (Raspberry Pi, machine perso) : voir `deploy/fripe.service`, à adapter aux chemins de ta machine.
 

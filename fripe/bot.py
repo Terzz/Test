@@ -6,11 +6,12 @@ import asyncio
 import html
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from telegram import InputMediaPhoto, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, InvalidToken, RetryAfter
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -29,13 +30,22 @@ from fripe.tiktok import NotATikTokUrl, TikTokError, find_tiktok_url
 from fripe.vinted import VintedClient, VintedError
 from fripe.vision import VisionError
 
-log = logging.getLogger(__name__)
+# Nom fixe : lance par `python -m`, __name__ vaudrait "__main__" dans le journal.
+log = logging.getLogger("fripe.bot")
 
 # Telegram plafonne les legendes a 1024 caracteres.
 CAPTION_LIMIT = 1024
 # Deux recherches simultanees au maximum : protege les quotas tikwm/Vinted et la
 # memoire d'un Raspberry Pi.
 GLOBAL_CONCURRENCY = 2
+# Au-dela de ce delai entre l'envoi d'un message et sa lecture, le bot etait
+# manifestement eteint : on le dit, sinon la reponse tardive surprend.
+LATE_AFTER = timedelta(minutes=10)
+# Telegram garde 24 h les messages recus pendant que le bot est eteint : on les
+# rattrape au demarrage au lieu de les jeter. Et au reveil d'une machine, le
+# reseau arrive souvent apres nous : PTB reessaie alors indefiniment (jusqu'a
+# toutes les 30 s) au lieu de planter et de laisser launchd relancer en boucle.
+POLLING_OPTIONS = {"drop_pending_updates": False, "bootstrap_retries": -1}
 
 HELP_FR = (
     "Salut ! 👋\n\n"
@@ -48,6 +58,20 @@ HELP_FR = (
 
 def _chat_locks() -> defaultdict[int, asyncio.Lock]:
     return defaultdict(asyncio.Lock)
+
+
+def ack_text(sent_at: datetime | None, now: datetime | None = None) -> str:
+    """Accuse de reception ; signale un lien recu pendant que le bot etait eteint."""
+    now = now or datetime.now(timezone.utc)
+    if sent_at is not None:
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        if now - sent_at > LATE_AFTER:
+            return (
+                "🔎 Reçu pendant que j'étais éteint, je m'en occupe maintenant. "
+                "Je récupère les photos…"
+            )
+    return "🔎 Je récupère les photos…"
 
 
 async def _post_init(app: Application) -> None:
@@ -66,8 +90,9 @@ async def _post_init(app: Application) -> None:
     )
     app.bot_data["locks"] = _chat_locks()
     app.bot_data["semaphore"] = asyncio.Semaphore(GLOBAL_CONCURRENCY)
-    me = await app.bot.get_me()
-    log.info("bot @%s pret (backend=%s)", me.username, cfg.llm_backend)
+    # Pas d'appel reseau ici : post_init n'est pas couvert par les reprises de
+    # PTB, et l'identite du bot est deja connue depuis l'initialisation.
+    log.info("bot @%s pret (backend=%s)", app.bot.username, cfg.llm_backend)
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -112,7 +137,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text(HELP_FR, parse_mode=ParseMode.HTML)
         return
 
-    status = await message.reply_text("🔎 Je récupère les photos…")
+    status = await message.reply_text(ack_text(message.date))
     ctx.application.create_task(
         run_job(update, ctx, message.text, status),
         update=update,
@@ -318,7 +343,10 @@ def main() -> None:
     try:
         cfg = load_config()
     except ConfigError as exc:
-        raise SystemExit(f"Configuration invalide : {exc}") from exc
+        # Dans le journal plutot que sur stderr : c'est la que l'on regarde
+        # quand le bot tourne en arriere-plan.
+        log.error("Configuration invalide : %s", exc)
+        raise SystemExit(1) from exc
 
     app = (
         ApplicationBuilder()
@@ -333,7 +361,18 @@ def main() -> None:
     app.add_handler(CommandHandler("help", on_start))
     app.add_handler(CommandHandler("id", on_id))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
-    app.run_polling(drop_pending_updates=True)
+    # PTB ne raconte ses reprises reseau qu'en DEBUG : cette ligne, restee
+    # sans « pret » derriere, dit qu'on attend le Wi-Fi (reveil de la machine).
+    log.info("connexion à Telegram…")
+    try:
+        app.run_polling(**POLLING_OPTIONS)
+    except InvalidToken as exc:
+        # PTB a deja journalise sa trace ; on termine par la phrase utile.
+        log.error(
+            "Telegram refuse le jeton TELEGRAM_BOT_TOKEN : vérifie le fichier .env "
+            "ou relance ./install.sh (%s)", exc,
+        )
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

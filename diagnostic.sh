@@ -45,6 +45,20 @@ $PY -c "import curl_cffi" 2>/dev/null \
     && ok "curl_cffi present (contournement anti-bot)" \
     || ko "curl_cffi absent : TikTok et Vinted repondront 403"
 
+if [ "$(uname -s)" = Darwin ]; then
+    if launchctl print "gui/$(id -u)/com.fripe.bot" >/dev/null 2>&1; then
+        PID_BOT="$(launchctl print "gui/$(id -u)/com.fripe.bot" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ -n "$PID_BOT" ]; then
+            ok "demarrage automatique actif, bot en cours (pid $PID_BOT)"
+        else
+            info "demarrage automatique installe mais bot arrete — voir ./autostart.sh status"
+            note "bot automatique arrete"
+        fi
+    else
+        info "demarrage automatique non installe (./autostart.sh)"
+    fi
+fi
+
 # ── 2. Configuration ──────────────────────────────────────────────────────────
 titre "2. Configuration (.env)"
 

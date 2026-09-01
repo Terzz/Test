@@ -66,3 +66,34 @@ def test_caption_accorde_le_pluriel():
     plusieurs = build_caption(make_result([make_item(1), make_item(2)]))
     assert "1 annonce" in une and "1 annonces" not in une
     assert "2 annonces" in plusieurs
+
+
+def test_ack_signale_un_lien_recu_pendant_l_arret():
+    from datetime import datetime, timedelta, timezone
+
+    from fripe.bot import ack_text
+
+    now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+    # Envoye il y a trois heures : le bot etait eteint, on le dit.
+    assert "éteint" in ack_text(now - timedelta(hours=3), now)
+    # Une date naive (sans fuseau) est lue comme de l'UTC, pas comme une erreur.
+    assert "éteint" in ack_text(now.replace(tzinfo=None) - timedelta(hours=2), now)
+
+
+def test_ack_normal_pour_un_lien_frais():
+    from datetime import datetime, timedelta, timezone
+
+    from fripe.bot import ack_text
+
+    now = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+    assert "éteint" not in ack_text(now - timedelta(seconds=5), now)
+    assert "éteint" not in ack_text(None, now)
+
+
+def test_le_bot_rattrape_les_messages_en_attente():
+    # Sans ces deux options, les liens envoyes pendant l'arret seraient jetes
+    # au demarrage, et une machine sans reseau au reveil ferait planter le bot.
+    from fripe.bot import POLLING_OPTIONS
+
+    assert POLLING_OPTIONS["drop_pending_updates"] is False
+    assert POLLING_OPTIONS["bootstrap_retries"] < 0

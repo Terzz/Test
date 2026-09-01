@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -125,12 +126,29 @@ def load_config(require_telegram: bool = True) -> Config:
     )
 
 
+def log_handlers() -> list[logging.Handler] | None:
+    """Journal tournant si FRIPE_LOG_FILE est defini (launchd, systemd), sinon la console.
+
+    Un service qui tourne des semaines ne doit pas remplir le disque : trois
+    fichiers de 2 Mo couvrent largement un usage perso.
+    """
+    log_file = (os.getenv("FRIPE_LOG_FILE") or "").strip()
+    if not log_file:
+        return None
+    path = Path(log_file).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return [RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")]
+
+
 def setup_logging() -> None:
     level = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    handlers = log_handlers()
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
+        # Dans un fichier qui traverse les jours, l'heure seule ne suffit pas.
+        datefmt="%Y-%m-%d %H:%M:%S" if handlers else "%H:%M:%S",
+        handlers=handlers,
     )
     # Le polling de PTB est tres bavard en DEBUG.
     logging.getLogger("httpx").setLevel(logging.WARNING)
