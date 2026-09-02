@@ -48,6 +48,22 @@ class Deps:
     http: httpx.AsyncClient
 
 
+def sweep_stale_slides(root: Path, max_age_s: float = 1800.0) -> int:
+    """Supprime les dossiers de slides qu'un arret brutal a laisses derriere lui."""
+    if not root.is_dir():
+        return 0
+    removed = 0
+    now = time.time()
+    for child in root.iterdir():
+        try:
+            if child.is_dir() and now - child.stat().st_mtime > max_age_s:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 async def _noop_progress(_: str) -> None:
     return None
 
@@ -229,6 +245,10 @@ async def process_link(
         raise NotATikTokUrl("aucun lien TikTok dans le message")
 
     post = await fetch_slides(share_url)
+    # Quelques centaines d'octets pour savoir si Vinted accepte la session,
+    # AVANT de payer l'analyse : quand Vinted bloque, chaque lien de la file
+    # echouerait sinon apres un appel vision inutile.
+    await deps.vinted.ensure_ready()
     # Suffixe unique : deux recherches simultanees du meme post ne doivent pas
     # partager le dossier, le rmtree du premier fini supprimerait les slides
     # de l'autre en pleine analyse.
@@ -242,7 +262,8 @@ async def process_link(
         analysis = await analyze_slides(slide_paths, deps.backend, cfg.analysis_model)
         garments = analysis.garments
         if not garments:
-            await _safe_progress(progress, "🤔 Je n'ai reconnu aucun vêtement sur ces photos.")
+            # C'est l'appelant qui annonce l'etat final : une seconde edition
+            # avec le meme texte serait refusee par Telegram.
             return []
 
         labels = ", ".join(g.label_fr for g in garments)

@@ -78,11 +78,16 @@ for cle in TELEGRAM_BOT_TOKEN "$CLE_IA"; do
     fi
 done
 
-if [ -n "$(valeur ALLOWED_CHAT_IDS)" ]; then
-    ok "ALLOWED_CHAT_IDS renseigne (bot prive)"
-else
-    info "ALLOWED_CHAT_IDS vide : n'importe qui peut utiliser ton bot"
-    note "bot ouvert a tout le monde (ALLOWED_CHAT_IDS vide)"
+case "$(valeur ALLOWED_CHAT_IDS)" in
+    "")  ko "ALLOWED_CHAT_IDS vide : le bot refuse tout le monde (envoie-lui /id, ajoute ton identifiant, relance)"
+         note "ALLOWED_CHAT_IDS vide : le bot ne repond a personne" ;;
+    "*") info "ALLOWED_CHAT_IDS=* : n'importe qui peut utiliser ton bot"
+         note "bot ouvert a tout le monde (ALLOWED_CHAT_IDS=*)" ;;
+    *)   ok "ALLOWED_CHAT_IDS renseigne (bot prive)" ;;
+esac
+
+if [ -d "$HOME/.claude/projects" ]; then
+    info "~/.claude/projects occupe $(du -sh "$HOME/.claude/projects" 2>/dev/null | cut -f1) (transcriptions Claude ; le bot n'en ecrit plus)"
 fi
 
 if [ "$BACKEND_IA" != "anthropic_api" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then

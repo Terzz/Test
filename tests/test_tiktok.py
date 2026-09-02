@@ -204,3 +204,88 @@ async def test_fetch_slides_annonce_une_video_quand_le_lien_court_en_cache_une(m
     with pytest.raises(tiktok.VideoPost) as exc:
         await tiktok.fetch_slides("https://vm.tiktok.com/ZGdxGpLHD/")
     assert "diaporama" in exc.value.user_message_fr
+
+
+@pytest.mark.parametrize(
+    "texte",
+    [
+        "https://lite.tiktok.com/t/ZS8abc123/",
+        "https://www.tiktok.com/photo/7300000000000000000",
+        "https://m.tiktok.com/t/ZTdabc123/",
+    ],
+)
+def test_find_tiktok_url_reconnait_tiktok_lite_et_les_liens_sans_auteur(texte):
+    assert find_tiktok_url(texte) == texte
+
+
+def test_find_tiktok_urls_rend_tous_les_liens_sans_doublon():
+    from fripe.tiktok import find_tiktok_urls
+
+    texte = (
+        "https://vm.tiktok.com/AAA/ et https://vm.tiktok.com/BBB/, "
+        "encore https://vm.tiktok.com/AAA/"
+    )
+    assert find_tiktok_urls(texte) == ["https://vm.tiktok.com/AAA/", "https://vm.tiktok.com/BBB/"]
+    assert find_tiktok_urls("rien") == []
+
+
+def test_clean_share_url_retire_les_parametres_de_suivi():
+    from fripe.tiktok import clean_share_url
+
+    sale = "https://www.tiktok.com/@x/photo/123?_t=ZN-8abc&_r=1#ancre"
+    assert clean_share_url(sale) == "https://www.tiktok.com/@x/photo/123"
+    assert clean_share_url("https://vm.tiktok.com/ZMabc/") == "https://vm.tiktok.com/ZMabc/"
+
+
+async def test_fetch_slides_transmet_le_lien_nettoye(monkeypatch, tikwm_photo):
+    recus = []
+
+    async def faux_tikwm(url):
+        recus.append(url)
+        return tikwm_photo
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", faux_tikwm)
+    await tiktok.fetch_slides("https://vm.tiktok.com/ZMabc/?_t=ZN-suivi&_r=1")
+    assert recus == ["https://vm.tiktok.com/ZMabc/"]
+
+
+async def test_fetch_slides_ignore_les_images_locales_d_un_tiers(monkeypatch, tikwm_photo):
+    payload = dict(tikwm_photo)
+    payload["data"] = dict(tikwm_photo["data"])
+    payload["data"]["images"] = ["file:///etc/passwd", "https://cdn.exemple/1.jpg"]
+
+    async def faux_tikwm(url):
+        return payload
+
+    monkeypatch.setattr(tiktok, "_tikwm_via_curl_cffi", faux_tikwm)
+    post = await tiktok.fetch_slides("https://vm.tiktok.com/ZMabc/")
+    assert post.image_urls == ["https://cdn.exemple/1.jpg"]
+
+
+async def test_download_slides_refuse_un_fichier_local_hors_des_dossiers_du_bot(fake_http, tmp_path):
+    image = tmp_path / "prive.jpg"
+    image.write_bytes(make_jpeg())
+    post = SlidePost(post_id="1", image_urls=[image.as_uri()])
+
+    with pytest.raises(ExtractorDown):
+        await tiktok.download_slides(post, tmp_path / "dest")
+
+
+async def test_download_slides_accepte_les_fichiers_du_repli_gallery_dl(fake_http, tmp_path):
+    racine = tmp_path / "fripe-gdl-test"
+    racine.mkdir()
+    image = racine / "1.jpg"
+    image.write_bytes(make_jpeg())
+    tiktok._TEMP_DIRS.add(racine)
+    post = SlidePost(post_id="1", image_urls=[image.as_uri()])
+
+    chemins = await tiktok.download_slides(post, tmp_path / "dest")
+
+    assert [p.name for p in chemins] == ["01.jpg"]
+    # download_slides a libere le dossier temporaire au passage.
+    assert racine not in tiktok._TEMP_DIRS
+
+
+def test_le_message_video_est_accentue_et_guide():
+    message = VideoPost().user_message_fr
+    assert "vidéo" in message and "Renvoie" in message

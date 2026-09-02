@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 import httpx
@@ -54,11 +54,14 @@ _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 _JPEG_MAGIC = b"\xff\xd8\xff"
 _FILE_SCHEME = "file://"
 
+# Formes de « Partager → Copier le lien » : vm./vt. (appli), lite.tiktok.com/t/
+# (TikTok Lite, tres repandu), www.tiktok.com/t/, et l'URL canonique avec ou
+# sans le segment @auteur.
 TIKTOK_URL_RE = re.compile(
     r"""https?://(?:
           v[mt]\.tiktok\.com/[A-Za-z0-9._-]+
-        | (?:www\.|m\.)?tiktok\.com/t/[A-Za-z0-9._-]+
-        | (?:www\.|m\.)?tiktok\.com/@[A-Za-z0-9._-]+/(?:photo|video)/\d+
+        | (?:[a-z0-9-]+\.)?tiktok\.com/t/[A-Za-z0-9._-]+
+        | (?:www\.|m\.)?tiktok\.com/(?:@[A-Za-z0-9._-]+/)?(?:photo|video)/\d+
     )(?:[/?\#][^\s<>"']*)?""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -95,8 +98,8 @@ class NotATikTokUrl(TikTokError):
 
 class VideoPost(TikTokError):
     default_message_fr = (
-        "Ce lien est une video, je ne sais traiter que les diaporamas photo "
-        "(les posts a plusieurs images)."
+        "Ce lien est une vidéo 🎬 Je ne sais lire que les diaporamas photo, "
+        "ceux qu'on fait défiler à la main. Renvoie-moi un lien de ce type."
     )
 
 
@@ -107,12 +110,30 @@ class ExtractorDown(TikTokError):
     )
 
 
+def find_tiktok_urls(text: str) -> list[str]:
+    """Toutes les URLs TikTok d'un message, dans l'ordre, sans doublon."""
+    found: list[str] = []
+    for match in TIKTOK_URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(_TRAILING_PUNCT)
+        if url and url not in found:
+            found.append(url)
+    return found
+
+
 def find_tiktok_url(text: str) -> str | None:
     """Renvoie la premiere URL TikTok d'un message Telegram, sinon None."""
-    match = TIKTOK_URL_RE.search(text or "")
-    if match is None:
-        return None
-    return match.group(0).rstrip(_TRAILING_PUNCT) or None
+    urls = find_tiktok_urls(text)
+    return urls[0] if urls else None
+
+
+def clean_share_url(url: str) -> str:
+    """Retire les parametres de suivi (_t, _r, u_code…) avant tout appel a un tiers.
+
+    Ils rattachent le partage au compte TikTok de la personne qui a copie le
+    lien ; le post lui-meme ne depend que du chemin.
+    """
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 async def fetch_slides(share_url: str) -> SlidePost:
@@ -124,6 +145,7 @@ async def fetch_slides(share_url: str) -> SlidePost:
     url = find_tiktok_url(share_url)
     if url is None:
         raise NotATikTokUrl(f"aucune URL TikTok dans {share_url!r}")
+    url = clean_share_url(url)
 
     reasons: list[str] = []
     try:
@@ -287,7 +309,13 @@ async def _fetch_via_tikwm(url: str) -> SlidePost:
     if not isinstance(data, dict):
         raise ValueError("tikwm code=0 sans objet 'data'")
 
-    images = [str(item) for item in (data.get("images") or []) if item]
+    # Seules des adresses web sont acceptees d'un service tiers : une entree
+    # file:// ferait lire un fichier local du Mac (cf. _download_one).
+    images = [
+        str(item)
+        for item in (data.get("images") or [])
+        if item and str(item).lower().startswith(("http://", "https://"))
+    ]
     if not images:
         raise VideoPost(f"post {url} sans liste 'images' (probablement une video)")
 
@@ -374,6 +402,8 @@ async def _download_one(
     async with semaphore:
         try:
             if url.startswith(_FILE_SCHEME):
+                if not _is_local_slide(url):
+                    raise ValueError("fichier local hors des dossiers temporaires du bot")
                 data = await asyncio.to_thread(_file_uri_to_path(url).read_bytes)
             else:
                 response = await client.get(url)
@@ -399,6 +429,15 @@ def _write_jpeg(data: bytes, target: Path) -> None:
 
 def _file_uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
+
+
+def _is_local_slide(uri: str) -> bool:
+    """Un file:// n'est legitime que sous un dossier cree par le repli gallery-dl."""
+    try:
+        path = _file_uri_to_path(uri).resolve()
+    except (OSError, ValueError):
+        return False
+    return any(root.resolve() in path.parents for root in _TEMP_DIRS)
 
 
 def _post_id_from_url(url: str) -> str | None:

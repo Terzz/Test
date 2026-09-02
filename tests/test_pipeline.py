@@ -29,6 +29,14 @@ class FakeVinted:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
+    ready_error: Exception | None = None
+    ready_calls = 0
+
+    async def ensure_ready(self) -> None:
+        self.ready_calls += 1
+        if self.ready_error is not None:
+            raise self.ready_error
+
     async def search(self, query, **kwargs):
         self.calls.append({"query": query, **kwargs})
         return self.responses.pop(0) if self.responses else []
@@ -232,3 +240,42 @@ async def test_pas_de_note_quand_l_elargissement_n_apporte_rien(tmp_path):
 
     assert [item.id for item in items] == [1, 2, 3, 4]
     assert note is None
+
+
+async def test_process_link_verifie_vinted_avant_de_payer_l_analyse(tmp_path, stub_stages, monkeypatch):
+    from fripe.vinted import VintedError
+
+    analyses = []
+
+    async def analyse_comptee(paths, backend, model):
+        analyses.append(1)
+        return AnalysisResult(garments=[])
+
+    monkeypatch.setattr(pipeline, "analyze_slides", analyse_comptee)
+    vinted = FakeVinted([])
+    vinted.ready_error = VintedError("403", user_message_fr="Vinted bloque")
+
+    with pytest.raises(VintedError):
+        await process_link("https://vm.tiktok.com/ZM66UoB9m/", make_config(tmp_path), make_deps(vinted))
+
+    # Vinted refuse : l'appel vision (le cout) n'a pas eu lieu.
+    assert analyses == [] and vinted.ready_calls == 1
+
+
+def test_sweep_stale_slides_ne_garde_que_le_recent(tmp_path):
+    import os
+    import time as _time
+
+    from fripe.pipeline import sweep_stale_slides
+
+    root = tmp_path / "slides"
+    vieux = root / "123-abcd"
+    recent = root / "456-efgh"
+    vieux.mkdir(parents=True)
+    recent.mkdir()
+    ancien = _time.time() - 7200
+    os.utime(vieux, (ancien, ancien))
+
+    assert sweep_stale_slides(root) == 1
+    assert not vieux.exists() and recent.exists()
+    assert sweep_stale_slides(tmp_path / "absent") == 0

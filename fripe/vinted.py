@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from curl_cffi.requests import AsyncSession
 
@@ -67,6 +68,9 @@ _AUTH_FR = (
     "réessaie dans quelques minutes."
 )
 _RATE_FR = "Vinted limite le rythme des recherches, réessaie dans quelques minutes."
+# Apres un refus de Vinted, inutile d'insister (et de payer des analyses) :
+# on refuse localement pendant ce delai.
+COOLDOWN_S = 600.0
 
 
 class VintedError(Exception):
@@ -100,6 +104,7 @@ class VintedClient:
 
         self._session: AsyncSession | None = None
         self._ready_at: float = 0.0
+        self._blocked_until: float = 0.0
         self._generation: int = 0
         self._cache_loaded = False
         # Ordre d'acquisition impose : bootstrap puis appel, jamais l'inverse.
@@ -136,6 +141,7 @@ class VintedClient:
             order=order,
         )
 
+        self._check_cooldown()
         generation = await self._ensure_cookies()
         status, payload = await self._call_api(params)
 
@@ -144,11 +150,13 @@ class VintedClient:
             await self._ensure_cookies(stale_generation=generation)
             status, payload = await self._call_api(params)
             if status in (401, 403):
+                self._block()
                 raise VintedAuthError(
                     f"HTTP {status} sur {SEARCH_URL} apres renouvellement des cookies"
                 )
 
         if status == 429:
+            self._block()
             raise VintedError(f"HTTP 429 sur {SEARCH_URL}", user_message_fr=_RATE_FR)
         if status != 200:
             raise VintedError(f"HTTP {status} inattendu sur {SEARCH_URL}")
@@ -163,6 +171,28 @@ class VintedClient:
             {k: v for k, v in params.items() if k not in {"search_text", "currency"}},
         )
         return items
+
+    async def ensure_ready(self) -> None:
+        """Verifie a bas cout que Vinted accepte la session (cookies), sans chercher."""
+        self._check_cooldown()
+        await self._ensure_cookies()
+
+    def _check_cooldown(self) -> None:
+        remaining = self._blocked_until - time.time()
+        if remaining <= 0:
+            return
+        minutes = int(remaining // 60) + 1
+        raise VintedError(
+            f"Vinted en pause encore {minutes} min apres un refus",
+            user_message_fr=(
+                "Vinted bloque les recherches automatiques pour le moment, je n'ai pas "
+                f"lancé l'analyse. Renvoie le lien dans {minutes} min."
+            ),
+        )
+
+    def _block(self) -> None:
+        self._blocked_until = time.time() + COOLDOWN_S
+        log.warning("Vinted refuse la session : pause de %.0f min", COOLDOWN_S / 60)
 
     async def close(self) -> None:
         session, self._session = self._session, None
@@ -251,6 +281,8 @@ class VintedClient:
 
         status = int(getattr(response, "status_code", 0) or 0)
         if status >= 400:
+            if status in (401, 403, 429):
+                self._block()
             raise VintedError(
                 f"HTTP {status} sur {BASE_URL}/ pendant le bootstrap",
                 user_message_fr=(
@@ -371,6 +403,24 @@ class VintedClient:
             session.cookies.clear()
         except Exception as exc:  # noqa: BLE001
             log.debug("Purge du jar de cookies impossible : %s", exc)
+
+
+def search_url(
+    query: str,
+    *,
+    catalog_id: int | None = None,
+    color_ids: Sequence[int] | None = None,
+    price_to: int | None = None,
+) -> str:
+    """Adresse de la meme recherche sur vinted.fr, a ouvrir dans l'appli ou le navigateur."""
+    params: list[tuple[str, str]] = [("search_text", query)]
+    if catalog_id:
+        params.append(("catalog[]", str(catalog_id)))
+    for color in color_ids or []:
+        params.append(("color_ids[]", str(color)))
+    if price_to:
+        params.append(("price_to", str(price_to)))
+    return f"{BASE_URL}/catalog?{urlencode(params)}"
 
 
 def _build_params(

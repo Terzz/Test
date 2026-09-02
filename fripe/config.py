@@ -28,9 +28,13 @@ class Config:
     max_results: int
     price_to: int | None
     allowed_chat_ids: frozenset[int] = field(default_factory=frozenset)
+    # ALLOWED_CHAT_IDS=* : ouvert a tout le monde, en connaissance de cause.
+    open_to_all: bool = False
 
     def is_allowed(self, chat_id: int) -> bool:
-        return not self.allowed_chat_ids or chat_id in self.allowed_chat_ids
+        # Ferme par defaut : un inconnu qui trouve le bot consommerait le
+        # credit mensuel, et le rattrapage traiterait sa nuit de liens en bloc.
+        return self.open_to_all or chat_id in self.allowed_chat_ids
 
 
 def _int_or_none(raw: str | None, name: str) -> int | None:
@@ -87,9 +91,14 @@ def load_config(require_telegram: bool = True) -> Config:
             "et colle le jeton dans le fichier .env."
         )
 
-    raw_ids = os.getenv("ALLOWED_CHAT_IDS") or ""
+    raw_ids = (os.getenv("ALLOWED_CHAT_IDS") or "").strip()
+    open_to_all = raw_ids == "*"
     try:
-        allowed = frozenset(int(part) for part in raw_ids.replace(";", ",").split(",") if part.strip())
+        allowed = frozenset(
+            int(part)
+            for part in ("" if open_to_all else raw_ids).replace(";", ",").split(",")
+            if part.strip()
+        )
     except ValueError as exc:
         raise ConfigError(
             f"ALLOWED_CHAT_IDS doit etre une liste d'entiers separes par des virgules "
@@ -111,6 +120,12 @@ def load_config(require_telegram: bool = True) -> Config:
     data_dir = Path(os.getenv("DATA_DIR") or "./data").expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Config garde les jetons ; l'environnement, non : tout sous-processus
+    # (gallery-dl, CLI claude) en heriterait, et `ps -E` les afficherait. Le
+    # backend Agent SDK transmet lui-meme le jeton OAuth a son sous-processus.
+    for name in ("TELEGRAM_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        os.environ.pop(name, None)
+
     return Config(
         telegram_token=telegram_token,
         llm_backend=llm_backend,
@@ -123,7 +138,39 @@ def load_config(require_telegram: bool = True) -> Config:
         max_results=max_results,
         price_to=_int_or_none(os.getenv("PRICE_TO"), "PRICE_TO"),
         allowed_chat_ids=allowed,
+        open_to_all=open_to_all,
     )
+
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
+
+
+class _MaskingFormatter(logging.Formatter):
+    """Remplace les jetons par *** dans tout ce qui part au journal, traces comprises."""
+
+    def __init__(self, fmt: str | None, datefmt: str | None, secrets: list[str]) -> None:
+        super().__init__(fmt, datefmt)
+        self._secrets = [s for s in secrets if s and len(s) >= 8]
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        for secret in self._secrets:
+            text = text.replace(secret, "***")
+        return text
+
+
+def mask_secrets(secrets: list[str | None]) -> None:
+    """A appeler des que les jetons sont connus : les bibliotheques les citent parfois."""
+    kept = [s for s in secrets if s]
+    for handler in logging.getLogger().handlers:
+        current = handler.formatter
+        handler.setFormatter(
+            _MaskingFormatter(
+                getattr(current, "_fmt", None) or _LOG_FORMAT,
+                getattr(current, "datefmt", None),
+                kept,
+            )
+        )
 
 
 def log_handlers() -> list[logging.Handler] | None:
@@ -137,18 +184,30 @@ def log_handlers() -> list[logging.Handler] | None:
         return None
     path = Path(log_file).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    return [RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")]
+    handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    try:
+        # Le journal peut citer des messages prives : lisible par ce compte seul.
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return [handler]
 
 
 def setup_logging() -> None:
+    # LOG_LEVEL et FRIPE_LOG_FILE peuvent venir du .env ; load_dotenv n'ecrase
+    # pas une variable deja posee par launchd ou la ligne de commande.
+    load_dotenv()
     level = (os.getenv("LOG_LEVEL") or "INFO").upper()
     handlers = log_handlers()
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+        format=_LOG_FORMAT,
         # Dans un fichier qui traverse les jours, l'heure seule ne suffit pas.
         datefmt="%Y-%m-%d %H:%M:%S" if handlers else "%H:%M:%S",
         handlers=handlers,
+        # Sans force, basicConfig se tait si un handler existe deja : le
+        # journal fichier deviendrait silencieusement une sortie console.
+        force=True,
     )
     # Le polling de PTB est tres bavard en DEBUG.
     logging.getLogger("httpx").setLevel(logging.WARNING)

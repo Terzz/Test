@@ -159,3 +159,26 @@ async def test_search_signale_la_limitation_de_rythme(tmp_path):
     with pytest.raises(VintedError) as exc:
         await client.search("veste")
     assert "rythme" in exc.value.user_message_fr
+
+
+async def test_apres_un_refus_vinted_est_en_pause(tmp_path):
+    from fripe.vinted import COOLDOWN_S, VintedClient, VintedError
+
+    client = VintedClient(tmp_path / "cookies.json")
+    client._block()
+    assert client._blocked_until > __import__("time").time() + COOLDOWN_S - 5
+
+    # Aucun appel reseau pendant la pause : ensure_ready et search refusent tout de suite.
+    with pytest.raises(VintedError) as exc:
+        await client.ensure_ready()
+    assert "pas lancé l'analyse" in exc.value.user_message_fr
+    with pytest.raises(VintedError):
+        await client.search("veste")
+
+
+def test_search_url_reprend_la_requete_et_les_filtres():
+    from fripe.vinted import search_url
+
+    url = search_url("veste cuir marron", catalog_id=1908, color_ids=[2, 1], price_to=80)
+    assert url.startswith("https://www.vinted.fr/catalog?search_text=veste+cuir+marron")
+    assert "catalog%5B%5D=1908" in url and "color_ids%5B%5D=2" in url and "price_to=80" in url

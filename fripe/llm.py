@@ -53,6 +53,24 @@ _TIMEOUT_FR = "L'analyse a mis trop de temps, réessaie."
 _PARSE_FR = "L'analyse a renvoyé une réponse inattendue, réessaie."
 _REFUSAL_FR = "Le modèle a refusé d'analyser ces images."
 _SETUP_FR = "Le service d'analyse est mal configuré sur le serveur."
+_AUTH_FR = (
+    "Le jeton Claude n'est plus accepté 🔑 Sur l'ordi : `claude setup-token` "
+    "puis ./install.sh pour le remplacer."
+)
+_QUOTA_FR = "Mon quota Claude est atteint pour le moment 😴 Réessaie dans quelques heures."
+
+# Le SDK signale un refus de l'API par un message texte, pas par une exception :
+# ces motifs distinguent un jeton perime (a renouveler) d'un quota atteint (a
+# attendre), les deux pannes attendues sur des semaines de fonctionnement.
+_AUTH_RE = re.compile(
+    r"authentication|unauthori[sz]ed|invalid.{0,20}(?:token|api key)|token.{0,20}(?:invalid|expired|revoked)"
+    r"|not logged in|please run /login|\b401\b",
+    re.IGNORECASE,
+)
+_QUOTA_RE = re.compile(
+    r"usage limit|limit reached|rate.?limit|too many requests|quota|\b429\b|overloaded|\b529\b",
+    re.IGNORECASE,
+)
 
 # Une reponse tronquee est illisible. Le modele d'analyse par defaut (opus 5)
 # raisonne en mode adaptatif et ses tokens de reflexion sont decomptes de
@@ -86,6 +104,23 @@ class LLMError(Exception):
     def __init__(self, message: str, *, user_message_fr: str = _GENERIC_FR) -> None:
         super().__init__(message)
         self.user_message_fr = user_message_fr
+
+
+def classify_failure(text: str) -> LLMError:
+    """Traduit un message d'erreur rendu par le modele en LLMError bien adressee."""
+    detail = " ".join((text or "").split())[:_MAX_RAW_CHARS]
+    if _AUTH_RE.search(detail):
+        user_fr = _AUTH_FR
+    elif _QUOTA_RE.search(detail):
+        user_fr = _QUOTA_FR
+    else:
+        user_fr = _GENERIC_FR
+    log.error("le modele a repondu par une erreur : %s", detail)
+    return LLMError(f"erreur renvoyee par le modele : {detail!r}", user_message_fr=user_fr)
+
+
+def looks_like_failure(text: str) -> bool:
+    return bool(_AUTH_RE.search(text or "") or _QUOTA_RE.search(text or ""))
 
 
 def _first_balanced_object(text: str) -> str | None:
@@ -254,6 +289,10 @@ class _VisionBackend:
         raise NotImplementedError
 
 
+def _log_cli_stderr(line: str) -> None:
+    log.debug("claude: %s", line.rstrip())
+
+
 class AgentSDKBackend(_VisionBackend):
     """Passe par claude-agent-sdk : facture sur l'abonnement, pas sur une cle API."""
 
@@ -278,7 +317,19 @@ class AgentSDKBackend(_VisionBackend):
             allowed_tools=[],
             disallowed_tools=list(_DISALLOWED_TOOLS),
             setting_sources=[],
-            env={"CLAUDE_CODE_OAUTH_TOKEN": self._oauth_token},
+            # Sans persistance : le CLI ecrirait sinon chaque appel (images en
+            # base64 comprises, plusieurs Mo) dans ~/.claude/projects, et son
+            # nettoyage automatique est desactive quand setting_sources est vide.
+            extra_args={"no-session-persistence": None},
+            env={
+                "CLAUDE_CODE_OAUTH_TOKEN": self._oauth_token,
+                # Le CLI est embarque dans la wheel : inutile de lancer
+                # `claude -v` (un processus de plus) avant chaque appel.
+                "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
+            },
+            # La sortie d'erreur du CLI va dans le journal tournant plutot que
+            # dans le fichier de launchd, jamais nettoye.
+            stderr=_log_cli_stderr,
         )
 
     async def _collect(self, options: Any, message: dict[str, Any]) -> str:
@@ -288,6 +339,7 @@ class AgentSDKBackend(_VisionBackend):
             yield message
 
         chunks: list[str] = []
+        failure: str | None = None
         async with ClaudeSDKClient(options=options) as client:
             await client.query(stream())
             async for response in client.receive_response():
@@ -295,6 +347,19 @@ class AgentSDKBackend(_VisionBackend):
                     for block in response.content:
                         if isinstance(block, TextBlock):
                             chunks.append(block.text)
+                # Le message final porte le verdict de l'API (jeton refuse,
+                # quota atteint) que les blocs texte ne disent pas toujours.
+                # Compare par nom : les symboles du SDK varient selon la version.
+                elif type(response).__name__ == "ResultMessage" and getattr(
+                    response, "is_error", False
+                ):
+                    failure = str(
+                        getattr(response, "result", None)
+                        or getattr(response, "errors", None)
+                        or getattr(response, "subtype", "erreur")
+                    )
+        if failure is not None:
+            raise classify_failure(failure)
         # Concatenation sans separateur : le SDK peut couper une meme reponse en
         # plusieurs blocs, y compris au milieu d'une chaine JSON, et un retour a
         # la ligne insere la rendrait invalide.
@@ -326,6 +391,8 @@ class AgentSDKBackend(_VisionBackend):
                 f"pas de reponse du modele en {self._timeout:.0f}s (modele {model})",
                 user_message_fr=_TIMEOUT_FR,
             ) from exc
+        except LLMError:
+            raise
         except Exception as exc:
             # Le binaire `claude` absent ou impossible a lancer est une erreur
             # d'installation, pas un incident passager. Compare par nom : les
@@ -341,7 +408,14 @@ class AgentSDKBackend(_VisionBackend):
             time.monotonic() - started,
             len(text),
         )
-        return extract_json(text)
+        try:
+            return extract_json(text)
+        except LLMError:
+            # Un refus en texte libre (« usage limit reached ») n'est pas une
+            # « reponse inattendue » a reessayer : on le dit avec les bons mots.
+            if looks_like_failure(text):
+                raise classify_failure(text) from None
+            raise
 
 
 class AnthropicAPIBackend(_VisionBackend):

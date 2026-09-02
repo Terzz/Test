@@ -67,3 +67,14 @@ def test_build_content_alterne_consignes_et_images():
 def test_build_content_sans_image():
     blocs = build_content([], "Ping")
     assert blocs == [{"type": "text", "text": "Ping"}]
+
+
+def test_classify_failure_distingue_jeton_et_quota():
+    from fripe.llm import _AUTH_FR, _GENERIC_FR, _QUOTA_FR, classify_failure, looks_like_failure
+
+    assert classify_failure("API Error: 401 authentication_error: invalid x-api-key").user_message_fr == _AUTH_FR
+    assert classify_failure("OAuth token has expired. Please run /login").user_message_fr == _AUTH_FR
+    assert classify_failure("You've hit your usage limit · resets 11:50pm").user_message_fr == _QUOTA_FR
+    assert classify_failure("API Error: 429 rate_limit_error").user_message_fr == _QUOTA_FR
+    assert classify_failure("quelque chose d'autre").user_message_fr == _GENERIC_FR
+    assert looks_like_failure("usage limit reached") and not looks_like_failure('{"garments": []}')

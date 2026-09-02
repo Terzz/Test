@@ -84,21 +84,21 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 
 ### 4. Réserver le bot à tes proches
 
-N'importe qui peut trouver un bot Telegram et consommer ton crédit. Écris `/id` à ton bot pour obtenir l'identifiant de ton chat, puis liste ceux que tu autorises :
+N'importe qui peut trouver un bot Telegram et consommer ton crédit : le bot ne répond donc qu'aux chats listés. Écris `/id` à ton bot pour obtenir l'identifiant de ton chat, puis liste ceux que tu autorises :
 
 ```
 ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
-Laisser la variable vide ouvre le bot à tout le monde (déconseillé).
+Tant que la liste est vide, le bot refuse tout le monde (et te donne ton identifiant). `ALLOWED_CHAT_IDS=*` l'ouvre à tout le monde, en connaissance de cause. Tout changement de `.env` demande de relancer le bot (`./autostart.sh restart` ou Ctrl+C puis `./start.sh`).
 
 ### 5. Lancer
 
 ```bash
-python -m fripe.bot
+./start.sh
 ```
 
-Envoie-lui un lien TikTok (**Partager → Copier le lien**) et attends une minute.
+Envoie-lui un lien TikTok (**Partager → Copier le lien**) : compte 2 à 4 minutes, le message de statut te tient au courant. Ne lance pas `./start.sh` en plus du démarrage automatique : deux bots sur le même jeton se volent les messages.
 
 ## Tester étape par étape
 
@@ -123,16 +123,27 @@ python -m fripe.cli run     https://vm.tiktok.com/XXXX/       # chaîne complèt
 Le bot démarre à chaque ouverture de session et redémarre s'il plante. Les liens
 envoyés pendant que le Mac était éteint sont traités au réveil : Telegram les
 garde 24 heures. Le Mac verrouillé convient ; en veille, le bot est en pause et
-reprend au réveil.
+reprend au réveil (une recherche interrompue par la veille est relancée une fois).
+Après un redémarrage du Mac, le bot repart dès que tu ouvres ta session.
+
+Pour un bot vraiment disponible 24h/24 sans rien acheter : dans Réglages Système →
+Batterie → Adaptateur secteur, active « Empêcher la mise en veille automatique
+lorsque l'écran est éteint ». Branché, le Mac reste alors éveillé (écran éteint) et
+le bot répond en continu.
+
+macOS affiche à l'installation « python a ajouté des éléments pouvant s'exécuter en
+arrière-plan » : c'est ce bot, laisse-le autorisé (Réglages Système → Général →
+Ouverture).
 
 ```bash
 ./autostart.sh status     # l'état et les dernières lignes du journal
 ./autostart.sh logs       # le journal en direct
-./autostart.sh restart    # après un git pull
+./autostart.sh restart    # après un git pull ou un changement de .env
 ./autostart.sh off        # retire le démarrage automatique
 ```
 
-Le journal est dans `data/logs/bot.log` (tournant, 3 × 2 Mo maximum).
+Le journal est dans `data/logs/bot.log` (tournant, 3 × 2 Mo maximum, jetons masqués).
+Pour plus de détail : `LOG_LEVEL=DEBUG` dans `.env` puis `./autostart.sh restart`.
 
 **systemd** (Raspberry Pi, machine perso) : voir `deploy/fripe.service`, à adapter aux chemins de ta machine.
 
@@ -158,5 +169,6 @@ Le bot fonctionne en *long polling* : aucun port à ouvrir, aucune IP publique, 
 
 - **Diaporamas photo uniquement.** Un lien vidéo est refusé avec un message clair.
 - L'extraction TikTok passe par un service tiers (tikwm), avec `gallery-dl` en secours : si les deux tombent, le bot le dit.
-- La recherche Vinted utilise leur API interne non officielle, sans garantie de stabilité. Le bot reste volontairement discret (une poignée de requêtes espacées) — n'en fais pas un outil de masse.
+- La recherche Vinted utilise leur API interne non officielle, sans garantie de stabilité. Le bot reste volontairement discret (une poignée de requêtes espacées) — n'en fais pas un outil de masse. Quand Vinted refuse, le bot fait une pause de 10 minutes sans lancer d'analyse.
+- Le lien TikTok (sans ses paramètres de suivi) et ton adresse IP sont transmis à tikwm.com, le service tiers qui récupère les images.
 - Le crédit Agent SDK inclus dans l'abonnement est plafonné mensuellement ; au-delà, l'usage bascule en facturation à l'usage.

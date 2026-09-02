@@ -155,7 +155,7 @@ titre "5. Qui a le droit d'utiliser le bot"
 
 info "N'importe qui peut tomber sur un bot Telegram et consommer ton crédit."
 info "Une fois le bot lancé, écris-lui ${BOLD}/id${OFF} : il te donne ton identifiant."
-info "Ajoute-le ensuite à ALLOWED_CHAT_IDS dans .env (séparés par des virgules)."
+info "Ajoute-le à ALLOWED_CHAT_IDS dans .env, puis relance le bot : sans ça, il refuse tout le monde."
 info "${DIM}Laisser vide = ouvert à tout le monde, déconseillé.${OFF}"
 
 # ── 6. Vérification ───────────────────────────────────────────────────────────

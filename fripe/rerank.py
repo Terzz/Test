@@ -86,9 +86,9 @@ class ClaudeReranker:
             kept[start : start + self._batch_size]
             for start in range(0, len(kept), self._batch_size)
         ]
-        results = await asyncio.gather(
-            *(self._rank_batch(source, batch, thumbnails, label) for batch in batches)
-        )
+        # En sequence : chaque lot lance un processus `claude` de plusieurs
+        # centaines de Mo ; deux liens simultanes en feraient quatre a la fois.
+        results = [await self._rank_batch(source, batch, thumbnails, label) for batch in batches]
         return _merge(results, kept, dropped)
 
     async def _fetch_thumbnails(

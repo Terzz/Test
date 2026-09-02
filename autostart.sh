@@ -4,15 +4,15 @@
 #   ./autostart.sh            installe et demarre (relancable sans risque)
 #   ./autostart.sh status     le bot tourne-t-il ? dernieres lignes du journal
 #   ./autostart.sh logs       suit le journal en direct (Ctrl+C pour sortir)
-#   ./autostart.sh restart    relance le bot (apres un `git pull` par exemple)
+#   ./autostart.sh restart    relance le bot (apres un `git pull` ou un changement de .env)
 #   ./autostart.sh off        desinstalle le demarrage automatique
 #
 # Le bot est relance s'il plante et rattrape, a chaque demarrage, les liens
 # envoyes pendant qu'il etait eteint (Telegram les garde 24 h).
 # Sur Linux / Raspberry Pi, voir deploy/fripe.service.
 
-set -euo pipefail
-cd "$(dirname "$0")"
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 REPO="$(pwd -P)"
 
 LABEL=com.fripe.bot
@@ -20,6 +20,11 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAINE="gui/$(id -u)"
 JOURNAL="$REPO/data/logs/bot.log"
 LANCEMENT="$REPO/data/logs/launchd.log"
+# Pas d'attente entre deux lectures du journal dans les tests.
+ATTENTE_PAS="${FRIPE_ATTENTE_PAS:-1}"
+# Une recherche complete (analyse, Vinted, re-classement) tient dans ce delai :
+# launchd laisse au bot le temps de la finir avant de le tuer.
+ARRET_MAX=300
 
 xml() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
@@ -42,7 +47,7 @@ plist() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>$(xml "$HOME")/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>FRIPE_LOG_FILE</key>
         <string>$(xml "$JOURNAL")</string>
         <key>PYTHONUNBUFFERED</key>
@@ -51,9 +56,14 @@ plist() {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>$ARRET_MAX</integer>
     <key>StandardOutPath</key>
     <string>$(xml "$LANCEMENT")</string>
     <key>StandardErrorPath</key>
@@ -76,17 +86,32 @@ pid_du_bot() {
         | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1
 }
 
+dernier_code() {
+    launchctl print "$DOMAINE/$LABEL" 2>/dev/null \
+        | sed -n 's/^[[:space:]]*last exit code = \([0-9-][0-9]*\).*/\1/p' | head -1
+}
+
+est_desactive() {
+    launchctl print-disabled "$DOMAINE" 2>/dev/null | grep -F "\"$LABEL\" => disabled" >/dev/null 2>&1
+}
+
 # Un bot lance a la main en parallele ferait doublon : Telegram refuse deux
-# ecoutes simultanees (409) et aucun des deux ne recevrait tout.
-bot_manuel() { pgrep -f '[.]venv/bin/python -m fripe\.bot' 2>/dev/null || true; }
+# ecoutes simultanees (409) et aucun des deux ne recevrait tout. Le motif
+# couvre ./start.sh comme un `python -m fripe.bot` depuis un venv active ;
+# le processus de launchd, lui, est ecarte par son pid.
+bot_manuel() {
+    local agent
+    agent="$(pid_du_bot)"
+    pgrep -f -- '-m fripe\.bot' 2>/dev/null | grep -vx "${agent:-0}" || true
+}
 
 lignes_journal() { if [ -f "$JOURNAL" ]; then wc -l < "$JOURNAL" | tr -d ' '; else echo 0; fi; }
 
 attendre_demarrage() {
-    # Attend jusqu'a 20 s que le journal annonce le bot pret, ou une erreur.
+    # Attend jusqu'a 20 lectures que le journal annonce le bot pret, ou une erreur.
     local avant="$1" i nouvelles
     for i in $(seq 1 20); do
-        sleep 1
+        sleep "$ATTENTE_PAS"
         nouvelles="$(tail -n +"$((avant + 1))" "$JOURNAL" 2>/dev/null || true)"
         if printf '%s' "$nouvelles" | grep -q 'pret (backend'; then
             echo "  [OK]    $(printf '%s' "$nouvelles" | grep 'pret (backend' | tail -1 | sed 's/.*| //')"
@@ -108,6 +133,38 @@ attendre_demarrage() {
     return 0
 }
 
+attendre_arret() {
+    # bootout rend la main tout de suite ; le bot, lui, termine d'abord la
+    # recherche en cours (jusqu'a ARRET_MAX s). Charger avant serait refuse.
+    local i
+    for i in $(seq 1 "$ARRET_MAX"); do
+        est_charge || return 0
+        [ "$i" -eq 3 ] && echo "  j'attends que le bot termine sa recherche en cours (jusqu'à 5 min)…"
+        sleep "$ATTENTE_PAS"
+    done
+    echo "  le bot précédent ne s'arrête pas ; on continue quand même." >&2
+    return 1
+}
+
+charger() {
+    # Decharge l'ancien job s'il existe, puis charge le plist. Retourne le
+    # numero de ligne du journal a partir duquel lire le demarrage.
+    if est_charge; then
+        launchctl bootout "$DOMAINE/$LABEL" 2>/dev/null || true
+        attendre_arret || true
+    fi
+    launchctl enable "$DOMAINE/$LABEL" 2>/dev/null || true
+    AVANT="$(lignes_journal)"
+    : > "$LANCEMENT"
+    local sortie
+    if ! sortie="$(launchctl bootstrap "$DOMAINE" "$PLIST" 2>&1)"; then
+        echo "Impossible de charger le démarrage automatique : ${sortie:-erreur launchctl}" >&2
+        echo "Pistes : être dans une session ouverte sur le Mac (pas en SSH), attendre une minute si le bot précédent finissait une recherche, puis relancer ./autostart.sh" >&2
+        return 1
+    fi
+    return 0
+}
+
 installer() {
     mac_requis
     [ -x .venv/bin/python ] || { echo "Le projet n'est pas installé. Lance d'abord : ./install.sh" >&2; exit 1; }
@@ -121,44 +178,42 @@ installer() {
             echo ;;
     esac
 
-    local pid_manuel
-    pid_manuel="$(bot_manuel)"
-    if [ -n "$pid_manuel" ] && ! est_charge; then
-        echo "Un bot lancé à la main tourne déjà (pid $pid_manuel)."
+    local pids_manuels p
+    pids_manuels="$(bot_manuel)"
+    if [ -n "$pids_manuels" ]; then
+        echo "Un bot lancé à la main tourne déjà (pid $(printf '%s' "$pids_manuels" | tr '\n' ' '))."
         printf "L'arrêter pour le passer en automatique ? [O/n] "
         read -r reponse
         case "$reponse" in
             n|N|non|Non) echo "Rien n'a été changé. Arrête-le (Ctrl+C) puis relance ./autostart.sh"; exit 1 ;;
         esac
-        kill "$pid_manuel" 2>/dev/null || true
+        for p in $pids_manuels; do kill "$p" 2>/dev/null || true; done
         sleep 2
     fi
 
     mkdir -p data/logs "$HOME/Library/LaunchAgents"
-    : > "$LANCEMENT"
+    chmod 700 data data/logs 2>/dev/null || true
     plist > "$PLIST"
 
-    # bootstrap refuse un job deja charge : on decharge d'abord (relance propre).
-    if est_charge; then
-        launchctl bootout "$DOMAINE/$LABEL" 2>/dev/null || true
-        sleep 1
-    fi
-    launchctl enable "$DOMAINE/$LABEL" 2>/dev/null || true
-    local avant
-    avant="$(lignes_journal)"
-    launchctl bootstrap "$DOMAINE" "$PLIST"
+    charger || exit 1
 
     echo "Démarrage automatique installé ($PLIST)."
     echo "Le bot démarre maintenant, puis à chaque ouverture de session…"
-    attendre_demarrage "$avant" || true
+    attendre_demarrage "$AVANT" || true
     echo
     echo "Et maintenant :"
     echo "  ./autostart.sh status    l'état et les dernières lignes du journal"
     echo "  ./autostart.sh logs      le journal en direct"
-    echo "  ./autostart.sh restart   après un git pull"
+    echo "  ./autostart.sh restart   après un git pull ou un changement de .env"
     echo "  ./autostart.sh off       pour tout retirer"
     echo
-    echo "Les liens envoyés pendant que le Mac est éteint sont traités au réveil (Telegram les garde 24 h)."
+    echo "Bon à savoir :"
+    echo "  • macOS peut afficher « python a ajouté des éléments pouvant s'exécuter en arrière-plan » :"
+    echo "    c'est ce bot, laisse-le autorisé (Réglages Système → Général → Ouverture)."
+    echo "  • Le bot tourne tant qu'une session est ouverte sur le Mac (écran verrouillé : ça marche)."
+    echo "    Après un redémarrage, il repart dès que tu te reconnectes."
+    echo "  • Les liens envoyés pendant que le Mac est éteint ou en veille sont traités au réveil"
+    echo "    (Telegram les garde 24 h)."
 }
 
 statut() {
@@ -168,15 +223,24 @@ statut() {
         exit 1
     fi
     if ! est_charge; then
-        echo "Démarrage automatique : installé mais pas chargé. Relance ./autostart.sh"
+        if est_desactive; then
+            echo "Démarrage automatique : désactivé dans Réglages Système → Général → Ouverture."
+            echo "Réactive-le là-bas, ou relance ./autostart.sh"
+        else
+            echo "Démarrage automatique : installé mais pas chargé. Relance ./autostart.sh"
+        fi
         exit 1
     fi
-    local pid
+    local pid code
     pid="$(pid_du_bot)"
+    code="$(dernier_code)"
     if [ -n "$pid" ]; then
         echo "Le bot tourne (pid $pid) et démarre automatiquement au login."
+    elif [ "${code:-}" = "0" ]; then
+        echo "Le bot s'est arrêté de lui-même (configuration invalide ou jeton refusé)."
+        echo "Corrige le fichier .env d'après le journal ci-dessous, puis : ./autostart.sh restart"
     else
-        echo "Le bot est chargé mais ne tourne pas en ce moment (relance automatique en cours ?)."
+        echo "Le bot ne tourne pas en ce moment${code:+ (dernier code de sortie : $code)} ; launchd le relance toutes les 30 s."
     fi
     echo
     echo "Dernières lignes du journal ($JOURNAL) :"
@@ -197,29 +261,35 @@ journal() {
 
 relancer() {
     mac_requis
-    est_charge || { echo "Le démarrage automatique n'est pas installé. Lance ./autostart.sh"; exit 1; }
-    local avant
-    avant="$(lignes_journal)"
-    : > "$LANCEMENT"
-    launchctl kickstart -k "$DOMAINE/$LABEL"
+    [ -f "$PLIST" ] || { echo "Le démarrage automatique n'est pas installé. Lance ./autostart.sh"; exit 1; }
+    # Le plist est regenere : un `git pull` peut l'avoir fait evoluer.
+    plist > "$PLIST"
+    charger || exit 1
     echo "Bot relancé…"
-    attendre_demarrage "$avant" || true
+    attendre_demarrage "$AVANT" || true
 }
 
 desinstaller() {
     mac_requis
-    if est_charge; then launchctl bootout "$DOMAINE/$LABEL" 2>/dev/null || true; fi
+    if est_charge; then
+        launchctl bootout "$DOMAINE/$LABEL" 2>/dev/null || true
+        attendre_arret || true
+    fi
     rm -f "$PLIST"
     echo "Démarrage automatique retiré : le bot ne tourne plus."
     echo "Pour le lancer à la main : ./start.sh"
 }
 
-case "${1:-install}" in
-    install|on)   installer ;;
-    status|etat)  statut ;;
-    logs|log)     journal ;;
-    restart)      relancer ;;
-    off|uninstall|remove) desinstaller ;;
-    plist)        plist ;;
-    *)  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
-esac
+# Le script peut etre « source » par les tests sans rien executer.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    case "${1:-install}" in
+        install|on)   installer ;;
+        status|etat)  statut ;;
+        logs|log)     journal ;;
+        restart)      relancer ;;
+        off|uninstall|remove) desinstaller ;;
+        plist)        plist ;;
+        pid)          pid_du_bot ;;
+        *)  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    esac
+fi

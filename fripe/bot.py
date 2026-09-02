@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
-from telegram import InputMediaPhoto, Update
+from telegram import InputMediaPhoto, LinkPreviewOptions, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, InvalidToken, RetryAfter
+from telegram.error import BadRequest, Conflict, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -21,13 +25,13 @@ from telegram.ext import (
     filters,
 )
 
-from fripe.config import Config, ConfigError, load_config, setup_logging
+from fripe.config import Config, ConfigError, load_config, mask_secrets, setup_logging
 from fripe.llm import LLMError, build_backend
-from fripe.models import GarmentResult
-from fripe.pipeline import Deps, process_link
+from fripe.models import Garment, GarmentResult, VintedItem
+from fripe.pipeline import Deps, process_link, sweep_stale_slides
 from fripe.rerank import build_reranker
-from fripe.tiktok import NotATikTokUrl, TikTokError, find_tiktok_url
-from fripe.vinted import VintedClient, VintedError
+from fripe.tiktok import NotATikTokUrl, TikTokError, find_tiktok_urls
+from fripe.vinted import VintedClient, VintedError, search_url
 from fripe.vision import VisionError
 
 # Nom fixe : lance par `python -m`, __name__ vaudrait "__main__" dans le journal.
@@ -41,11 +45,27 @@ GLOBAL_CONCURRENCY = 2
 # Au-dela de ce delai entre l'envoi d'un message et sa lecture, le bot etait
 # manifestement eteint : on le dit, sinon la reponse tardive surprend.
 LATE_AFTER = timedelta(minutes=10)
+# Un lien renvoye « pour etre sur » pendant que le bot ne repondait pas ne doit
+# pas payer une deuxieme analyse : meme lien, meme chat, dans cette fenetre.
+DEDUP_WINDOW_S = 30 * 60
+# Pendant une recherche, l'horloge monotone s'arrete si la machine dort alors
+# que l'horloge murale continue : un ecart trahit une veille, et donc des
+# connexions mortes. On recommence une fois plutot que d'accuser le lien.
+SLEEP_GAP_S = 60
 # Telegram garde 24 h les messages recus pendant que le bot est eteint : on les
 # rattrape au demarrage au lieu de les jeter. Et au reveil d'une machine, le
 # reseau arrive souvent apres nous : PTB reessaie alors indefiniment (jusqu'a
 # toutes les 30 s) au lieu de planter et de laisser launchd relancer en boucle.
 POLLING_OPTIONS = {"drop_pending_updates": False, "bootstrap_retries": -1}
+# Code de sortie des arrets definitifs (configuration invalide, jeton refuse) :
+# launchd ne relance pas un processus sorti en 0 (KeepAlive SuccessfulExit=false),
+# alors qu'un plantage (code != 0) est bien relance.
+EXIT_DEFINITIVE = 0
+# launchd n'effectue aucune rotation de son propre fichier de sortie.
+LAUNCHD_LOG_MAX = 1_000_000
+LAUNCHD_LOG_KEEP = 200_000
+# Un delai (RetryAfter) est rejoue une fois ; au-dela, on abandonne l'envoi.
+_NO_PREVIEW = {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
 
 HELP_FR = (
     "Salut ! 👋\n\n"
@@ -54,24 +74,44 @@ HELP_FR = (
     "Sur TikTok : <b>Partager</b> → <b>Copier le lien</b>, puis colle-le ici.\n\n"
     "⚠️ Je ne traite que les diaporamas photo, pas les vidéos."
 )
+HINT_FR = (
+    "Je ne lis que les liens TikTok en mode photo 🙂 Sur TikTok : "
+    "<b>Partager</b> → <b>Copier le lien</b>, puis colle-le ici."
+)
+BAD_LINK_FR = (
+    "Je ne reconnais pas ce lien TikTok 🤔 Renvoie-moi celui de "
+    "<b>Partager</b> → <b>Copier le lien</b>."
+)
+RESTARTING_FR = "⚠️ Je redémarre, renvoie ton lien dans une minute 🙏"
+DUPLICATE_FR = "Je m'occupe déjà de ce lien 😉 (ou je viens de te l'envoyer)"
+NOT_CONFIGURED_FR = (
+    "🔒 Ce bot est privé et pas encore configuré.\n"
+    "Ton identifiant : <code>{chat_id}</code>\n"
+    "Ajoute-le à ALLOWED_CHAT_IDS dans le fichier .env, puis relance le bot "
+    "(./autostart.sh restart)."
+)
+PRIVATE_FR = (
+    "Ce bot est privé 🙈 Demande à son propriétaire de t'ajouter "
+    "(identifiant de ce chat : {chat_id})."
+)
+NO_GARMENT_FR = "🤔 Je n'ai reconnu aucun vêtement sur ces photos."
 
 
 def _chat_locks() -> defaultdict[int, asyncio.Lock]:
     return defaultdict(asyncio.Lock)
 
 
-def ack_text(sent_at: datetime | None, now: datetime | None = None) -> str:
-    """Accuse de reception ; signale un lien recu pendant que le bot etait eteint."""
+def ack_text(sent_at: datetime | None, now: datetime | None = None, *, count: int = 1) -> str:
+    """Accuse de reception ; signale un lien recu pendant que le bot etait eteint.
+
+    Telegram fournit toujours une date UTC consciente du fuseau.
+    """
     now = now or datetime.now(timezone.utc)
-    if sent_at is not None:
-        if sent_at.tzinfo is None:
-            sent_at = sent_at.replace(tzinfo=timezone.utc)
-        if now - sent_at > LATE_AFTER:
-            return (
-                "🔎 Reçu pendant que j'étais éteint, je m'en occupe maintenant. "
-                "Je récupère les photos…"
-            )
-    return "🔎 Je récupère les photos…"
+    late = sent_at is not None and now - sent_at > LATE_AFTER
+    prefix = "🔎 Reçu pendant que j'étais éteint, je m'en occupe maintenant. " if late else "🔎 "
+    if count > 1:
+        return prefix + f"J'ai trouvé {count} liens, je les traite l'un après l'autre."
+    return prefix + "Je récupère les photos…"
 
 
 async def _post_init(app: Application) -> None:
@@ -90,6 +130,21 @@ async def _post_init(app: Application) -> None:
     )
     app.bot_data["locks"] = _chat_locks()
     app.bot_data["semaphore"] = asyncio.Semaphore(GLOBAL_CONCURRENCY)
+    app.bot_data["recents"] = {}
+    app.bot_data["net_error_at"] = 0.0
+
+    # Un arret brutal (SIGKILL, coupure) saute le nettoyage du pipeline.
+    removed = sweep_stale_slides(cfg.data_dir / "slides")
+    if removed:
+        log.info("%d dossier(s) de slides orphelin(s) supprime(s)", removed)
+
+    if cfg.open_to_all:
+        log.warning("ALLOWED_CHAT_IDS=* : n'importe qui peut utiliser ce bot et consommer ton credit")
+    elif not cfg.allowed_chat_ids:
+        log.warning(
+            "ALLOWED_CHAT_IDS est vide : le bot refuse tout le monde tant que ton "
+            "identifiant n'y est pas (envoie-lui /id)"
+        )
     # Pas d'appel reseau ici : post_init n'est pas couvert par les reprises de
     # PTB, et l'identite du bot est deja connue depuis l'initialisation.
     log.info("bot @%s pret (backend=%s)", app.bot.username, cfg.llm_backend)
@@ -118,67 +173,101 @@ async def on_id(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Identifiant de ce chat : {update.effective_chat.id}")
 
 
+def _seen_recently(recents: dict, chat_id: int, url: str) -> bool:
+    now = time.monotonic()
+    for key, stamp in list(recents.items()):
+        if now - stamp > DEDUP_WINDOW_S:
+            del recents[key]
+    return (chat_id, url) in recents
+
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     chat = update.effective_chat
-    if message is None or chat is None or not message.text:
+    if message is None or chat is None:
+        return
+    # Une photo avec le lien en legende est un usage naturel sur telephone.
+    text = message.text or message.caption or ""
+    if not text:
         return
 
     cfg: Config = ctx.application.bot_data["cfg"]
     if not cfg.is_allowed(chat.id):
         log.warning("chat non autorise : %s", chat.id)
-        await message.reply_text(
-            "Ce bot est privé 🙈 Demande à son propriétaire de t'ajouter "
-            f"(identifiant de ce chat : {chat.id})."
+        template = PRIVATE_FR if cfg.allowed_chat_ids else NOT_CONFIGURED_FR
+        await _safe_send(message, template.format(chat_id=chat.id))
+        return
+
+    urls = find_tiktok_urls(text)
+    if not urls:
+        await _safe_send(message, BAD_LINK_FR if "tiktok" in text.lower() else HINT_FR)
+        return
+
+    if not ctx.application.running:
+        # Arret en cours : une tache creee maintenant ne serait jamais attendue
+        # et mourrait avec le processus, accuse de reception deja envoye.
+        await _safe_send(message, RESTARTING_FR)
+        return
+
+    recents: dict = ctx.application.bot_data.setdefault("recents", {})
+    fresh = [url for url in urls if not _seen_recently(recents, chat.id, url)]
+    if not fresh:
+        await _safe_send(message, DUPLICATE_FR)
+        return
+    for url in fresh:
+        recents[(chat.id, url)] = time.monotonic()
+
+    # Un seul accuse de reception, meme pour plusieurs liens : au rattrapage
+    # d'un lot, une rafale de messages vers un meme chat finit en 429.
+    status = await _safe_send(message, ack_text(message.date, count=len(fresh)))
+    for index, url in enumerate(fresh):
+        ctx.application.create_task(
+            run_job(update, ctx, url, status if index == 0 else None),
+            update=update,
         )
-        return
-
-    if not find_tiktok_url(message.text):
-        await message.reply_text(HELP_FR, parse_mode=ParseMode.HTML)
-        return
-
-    status = await message.reply_text(ack_text(message.date))
-    ctx.application.create_task(
-        run_job(update, ctx, message.text, status),
-        update=update,
-    )
 
 
-async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, status) -> None:
+async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE, url: str, status) -> None:
     cfg: Config = ctx.application.bot_data["cfg"]
     deps: Deps = ctx.application.bot_data["deps"]
     locks: defaultdict[int, asyncio.Lock] = ctx.application.bot_data["locks"]
     semaphore: asyncio.Semaphore = ctx.application.bot_data["semaphore"]
+    recents: dict = ctx.application.bot_data.setdefault("recents", {})
     chat_id = update.effective_chat.id if update.effective_chat else 0
 
-    async def progress(message: str) -> None:
-        await status.edit_text(message)
+    async def progress(text: str) -> None:
+        await _edit(status, text)
 
     if locks[chat_id].locked():
-        await status.edit_text("⏳ Je termine d'abord ta recherche précédente…")
+        await _edit(status, "⏳ Je termine d'abord ta recherche précédente…")
 
     async with locks[chat_id], semaphore:
+        keep_awake = await _keep_awake()
         try:
-            results = await process_link(text, cfg, deps, progress)
+            results = await _run_pipeline(url, cfg, deps, progress, status)
+        except asyncio.CancelledError:
+            await _edit(status, "⏹ Interrompu par un redémarrage, renvoie le lien 🙏")
+            raise
         except (NotATikTokUrl, TikTokError, VintedError, LLMError, VisionError) as exc:
             user_message = getattr(exc, "user_message_fr", None) or "Ça n'a pas marché 😕"
             log.info("echec utilisateur (%s) : %s", type(exc).__name__, exc)
-            await status.edit_text(user_message)
+            await _edit(status, user_message)
             return
         except Exception:
             log.exception("echec inattendu du pipeline")
-            await status.edit_text("Oups, quelque chose a cassé de mon côté 😅 Réessaie plus tard.")
+            await _edit(status, "Oups, quelque chose a cassé de mon côté 😅 Réessaie plus tard.")
             return
+        finally:
+            await _release(keep_awake)
+            recents[(chat_id, url)] = time.monotonic()
 
         if not results:
-            await status.edit_text("🤔 Je n'ai reconnu aucun vêtement sur ces photos.")
+            await _edit(status, NO_GARMENT_FR)
             return
 
-        try:
-            await status.delete()
-        except Exception:
-            log.debug("suppression du message de statut impossible", exc_info=True)
-
+        # Le statut reste affiche pendant l'envoi : un arret brutal laisse au
+        # moins un message coherent plutot qu'un chat sans explication.
+        await _edit(status, "📦 J'envoie les résultats…")
         # Un envoi rate (reseau, flood) ne doit pas emporter les albums
         # suivants : l'analyse a deja ete payee pour chacun d'eux.
         rates = 0
@@ -188,27 +277,119 @@ async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, sta
             except Exception:
                 rates += 1
                 log.exception("envoi de l'album %r en echec", result.garment.label_fr)
+        await _delete(status)
         if rates:
-            try:
-                await update.message.reply_text(
-                    f"⚠️ {rates} album(s) n'ont pas pu être envoyés, désolé."
-                )
-            except Exception:
-                log.debug("impossible de signaler les albums perdus", exc_info=True)
+            await _safe_send(update.message, f"⚠️ {rates} album(s) n'ont pas pu être envoyés, désolé.")
+
+
+async def _run_pipeline(url: str, cfg: Config, deps: Deps, progress, status):
+    wall, mono = time.time(), time.monotonic()
+    try:
+        return await process_link(url, cfg, deps, progress)
+    except (TikTokError, VintedError, LLMError) as exc:
+        slept = (time.time() - wall) - (time.monotonic() - mono)
+        if slept < SLEEP_GAP_S:
+            raise
+        log.info(
+            "la machine a dormi ~%.0f s pendant la recherche (%s) : nouvel essai",
+            slept,
+            type(exc).__name__,
+        )
+        await _edit(status, "💤 Le Mac s'est endormi pendant la recherche, je recommence…")
+        return await process_link(url, cfg, deps, progress)
+
+
+async def _keep_awake():
+    """Sur Mac, empeche la veille d'inactivite le temps d'une recherche (15 min max)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        return await asyncio.create_subprocess_exec(
+            "caffeinate", "-i", "-t", "900",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
+async def _release(process) -> None:
+    if process is None or process.returncode is not None:
+        return
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), 5)
+    except Exception:
+        log.debug("caffeinate ne s'est pas arrete proprement", exc_info=True)
+
+
+async def _safe_send(message, text: str):
+    """Envoie une reponse sans jamais faire echouer le handler ; None si impossible."""
+    if message is None:
+        return None
+    try:
+        return await _with_retry(lambda: message.reply_text(text, parse_mode=ParseMode.HTML))
+    except Exception:
+        log.warning("reponse Telegram impossible", exc_info=True)
+        return None
+
+
+async def _edit(status, text: str) -> None:
+    if status is None:
+        return
+    try:
+        await _with_retry(lambda: status.edit_text(text))
+    except BadRequest as exc:
+        # Le meme texte deux fois n'est pas une erreur qui merite une trace.
+        if "not modified" not in str(exc).lower():
+            log.debug("edition du statut refusee : %s", exc)
+    except Exception:
+        log.debug("edition du statut impossible", exc_info=True)
+
+
+async def _delete(status) -> None:
+    if status is None:
+        return
+    try:
+        await status.delete()
+    except Exception:
+        log.debug("suppression du message de statut impossible", exc_info=True)
+
+
+def album_items(result: GarmentResult) -> list[VintedItem]:
+    """Les annonces avec photo d'abord : l'ordre des medias, donc de la numerotation."""
+    with_photo = [item for item in result.items if item.photo_url]
+    without = [item for item in result.items if not item.photo_url]
+    return with_photo + without
+
+
+def garment_search_url(garment: Garment) -> str:
+    query = garment.queries_fr[0] if garment.queries_fr else garment.label_fr
+    return search_url(query, catalog_id=garment.catalog_id, color_ids=garment.color_ids)
+
+
+def _link(url: str, label: str) -> str:
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
 
 
 def build_caption(result: GarmentResult) -> str:
     """Legende HTML de l'album : une ligne par annonce, tronquee a 1024 caracteres."""
     header = f"🧵 <b>{html.escape(result.garment.label_fr)}</b>"
-    if result.items:
-        pluriel = "s" if len(result.items) > 1 else ""
-        header += f" — {len(result.items)} annonce{pluriel}"
+    ordered = album_items(result)
+    if ordered:
+        pluriel = "s" if len(ordered) > 1 else ""
+        header += f" — {len(ordered)} annonce{pluriel}"
     if result.note_fr:
         header += f"\n<i>{html.escape(result.note_fr)}</i>"
 
+    # Le lien de secours vers Vinted reste utile quand l'album deçoit ; sa
+    # place est reservee avant de remplir, ainsi que celle du « … et N autres ».
+    footer = "🔗 " + _link(garment_search_url(result.garment), "Voir plus sur Vinted") if ordered else ""
+    budget = CAPTION_LIMIT - (len(footer) + 1 if footer else 0) - len("\n… et 99 autres")
+
     lines = [header]
-    for position, item in enumerate(result.items, start=1):
-        title = html.escape(item.title[:40].strip())
+    for position, item in enumerate(ordered, start=1):
+        title = item.title[:40].strip()
         details = [item.price_label()]
         if item.brand_title:
             details.append(html.escape(item.brand_title))
@@ -216,12 +397,31 @@ def build_caption(result: GarmentResult) -> str:
             details.append(html.escape(item.size_title))
         if item.status:
             details.append(html.escape(item.status))
-        line = f'{position}. <a href="{html.escape(item.url, quote=True)}">{title}</a> — ' + " · ".join(
-            details
-        )
-        if sum(len(part) + 1 for part in lines) + len(line) > CAPTION_LIMIT:
+        if not item.photo_url:
+            details.append("sans photo")
+        line = f"{position}. " + _link(item.url, title) + " — " + " · ".join(details)
+        if sum(len(part) + 1 for part in lines) + len(line) > budget:
+            rest = len(ordered) - position + 1
+            lines.append(f"… et {rest} autre{'s' if rest > 1 else ''}")
             break
         lines.append(line)
+    if footer:
+        lines.append(footer)
+    return "\n".join(lines)
+
+
+def no_result_text(result: GarmentResult) -> str:
+    """Message « rien trouve » : les requetes essayees, cliquables sur Vinted."""
+    garment = result.garment
+    queries = garment.queries_fr or [garment.label_fr]
+    lines = [f"🧵 <b>{html.escape(garment.label_fr)}</b>"]
+    if result.note_fr:
+        lines.append(f"<i>{html.escape(result.note_fr)}</i>")
+    lines.append("Rien trouvé sur Vinted 😕 Ouvre ces recherches, il y a peut-être du nouveau :")
+    for query in queries:
+        url = search_url(query, catalog_id=garment.catalog_id, color_ids=garment.color_ids)
+        lines.append("🔗 " + _link(url, f"« {query} »"))
+    lines.append("Sinon, essaie avec des photos plus nettes.")
     return "\n".join(lines)
 
 
@@ -254,17 +454,12 @@ async def send_garment_album(message, result: GarmentResult, http: httpx.AsyncCl
     if message is None:
         return
 
-    caption = build_caption(result)
     if not result.items:
-        await message.reply_text(
-            f"{caption}\n\nRien trouvé sur Vinted 😕 Essaie avec des photos plus nettes, "
-            "ou cherche à la main avec ces mots-clés.",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        await message.reply_text(no_result_text(result), parse_mode=ParseMode.HTML, **_NO_PREVIEW)
         return
 
-    items = [item for item in result.items if item.photo_url]
+    caption = build_caption(result)
+    items = [item for item in album_items(result) if item.photo_url]
     if len(items) < 2:
         # De preference l'item qui a une photo, meme s'il n'est pas premier.
         await _send_single(message, items[0] if items else result.items[0], caption, http)
@@ -301,7 +496,7 @@ async def send_garment_album(message, result: GarmentResult, http: httpx.AsyncCl
         except BadRequest:
             log.debug("photo refusee : %s", item.photo_url)
     if not sent_caption:
-        await message.reply_text(caption, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        await message.reply_text(caption, parse_mode=ParseMode.HTML, **_NO_PREVIEW)
 
 
 async def _send_single(message, item, caption: str, http: httpx.AsyncClient) -> None:
@@ -326,7 +521,7 @@ async def _send_single(message, item, caption: str, http: httpx.AsyncClient) -> 
                 return
             except BadRequest:
                 log.info("photo unique refusee aussi en televersant, repli en texte")
-    await message.reply_text(caption, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await message.reply_text(caption, parse_mode=ParseMode.HTML, **_NO_PREVIEW)
 
 
 async def _with_retry(action):
@@ -334,19 +529,64 @@ async def _with_retry(action):
     try:
         return await action()
     except RetryAfter as exc:
-        await asyncio.sleep(float(exc.retry_after) + 0.5)
+        # PTB expose le delai en secondes aujourd'hui, en timedelta demain :
+        # l'attribut prive est deja un timedelta, sans avertissement.
+        delay = getattr(exc, "_retry_after", None)
+        seconds = delay.total_seconds() if delay is not None else float(exc.retry_after)
+        await asyncio.sleep(seconds + 0.5)
         return await action()
 
 
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Une ligne pour les coupures reseau du polling, une trace pour le reste."""
+    error = ctx.error
+    if update is None and isinstance(error, (NetworkError, TimedOut, Conflict)):
+        if isinstance(error, Conflict):
+            text = (
+                "un autre bot écoute déjà ce jeton Telegram (409) : "
+                "un ./start.sh tourne encore quelque part ?"
+            )
+        else:
+            text = f"Telegram injoignable ({type(error).__name__}), nouvel essai automatique"
+        data = ctx.application.bot_data
+        # Le polling reessaie toutes les 30 s au plus : une ligne toutes les
+        # cinq minutes suffit a dire que l'on attend le reseau.
+        if time.monotonic() - data.get("net_error_at", 0.0) > 300:
+            data["net_error_at"] = time.monotonic()
+            log.warning(text)
+        return
+    log.error("erreur non gérée", exc_info=error)
+
+
+def _trim_launchd_log() -> None:
+    """launchd ne tourne jamais son fichier de sortie : on le borne nous-memes."""
+    log_file = os.environ.get("FRIPE_LOG_FILE")
+    if not log_file:
+        return
+    path = Path(log_file).with_name("launchd.log")
+    try:
+        if path.stat().st_size > LAUNCHD_LOG_MAX:
+            path.write_bytes(path.read_bytes()[-LAUNCHD_LOG_KEEP:])
+    except OSError:
+        pass
+
+
 def main() -> None:
+    # Journal, cookies et slides ne regardent que ce compte.
+    os.umask(0o077)
     setup_logging()
+    _trim_launchd_log()
     try:
         cfg = load_config()
     except ConfigError as exc:
         # Dans le journal plutot que sur stderr : c'est la que l'on regarde
         # quand le bot tourne en arriere-plan.
         log.error("Configuration invalide : %s", exc)
-        raise SystemExit(1) from exc
+        log.error("Arrêt : corrige le fichier .env puis relance (./autostart.sh restart).")
+        raise SystemExit(EXIT_DEFINITIVE) from exc
+    # Les jetons ne doivent jamais apparaitre dans le journal, meme via une
+    # trace de bibliotheque (PTB cite le jeton Telegram quand il est refuse).
+    mask_secrets([cfg.telegram_token, cfg.claude_oauth_token, cfg.anthropic_api_key])
 
     app = (
         ApplicationBuilder()
@@ -360,19 +600,21 @@ def main() -> None:
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_start))
     app.add_handler(CommandHandler("id", on_id))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
-    # PTB ne raconte ses reprises reseau qu'en DEBUG : cette ligne, restee
-    # sans « pret » derriere, dit qu'on attend le Wi-Fi (reveil de la machine).
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
+    app.add_error_handler(on_error)
+    # PTB ne raconte ses reprises reseau qu'en DEBUG pendant la connexion
+    # initiale : cette ligne, restee sans « pret » derriere, dit qu'on attend
+    # le Wi-Fi (reveil de la machine). Une fois connecte, voir on_error.
     log.info("connexion à Telegram…")
     try:
         app.run_polling(**POLLING_OPTIONS)
     except InvalidToken as exc:
-        # PTB a deja journalise sa trace ; on termine par la phrase utile.
+        # Sans le detail de l'exception : PTB y recopie le jeton en clair.
         log.error(
             "Telegram refuse le jeton TELEGRAM_BOT_TOKEN : vérifie le fichier .env "
-            "ou relance ./install.sh (%s)", exc,
+            "ou relance ./install.sh."
         )
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_DEFINITIVE) from exc
 
 
 if __name__ == "__main__":
